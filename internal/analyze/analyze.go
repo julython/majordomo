@@ -4,13 +4,67 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
 
 	"github.com/julython/majordomo/internal/grade"
 	"github.com/julython/majordomo/internal/llm"
+	"github.com/julython/majordomo/internal/mdrender"
 )
+
+// Sink is how analyze writes output.
+type Sink interface {
+	Print(text string)
+	PrintMarkdown(text string)
+	PrintStyled(line string)
+	Status(text string)
+	Error(text string)
+	Finish(summary string)
+}
+
+type markdownRenderer interface {
+	Render(src string) (string, error)
+}
+
+type stdoutSink struct {
+	w      io.Writer
+	md     markdownRenderer
+	mdWrap int
+}
+
+func (s *stdoutSink) Print(text string)       { fmt.Fprintln(s.w, text) }
+func (s *stdoutSink) PrintStyled(line string) { fmt.Fprintln(s.w, line) }
+func (s *stdoutSink) Status(text string)      { fmt.Fprintln(os.Stderr, text) }
+func (s *stdoutSink) Error(text string)       { fmt.Fprintln(os.Stderr, "error:", text) }
+func (s *stdoutSink) Finish(summary string)   {}
+
+func (s *stdoutSink) PrintMarkdown(text string) {
+	if text == "" {
+		fmt.Fprintln(s.w)
+		return
+	}
+	wrap := mdrender.TermWidth(80) - 2
+	if wrap < 20 {
+		wrap = 20
+	}
+	if s.md == nil || s.mdWrap != wrap {
+		r, err := mdrender.NewRenderer(wrap)
+		if err != nil {
+			fmt.Fprintln(s.w, text)
+			return
+		}
+		s.md = r
+		s.mdWrap = wrap
+	}
+	out, err := s.md.Render(text)
+	if err != nil {
+		fmt.Fprintln(s.w, text)
+		return
+	}
+	fmt.Fprintln(s.w, strings.TrimRight(out, "\n"))
+}
 
 type Output struct {
 	Summary   Summary        `json:"summary"`
@@ -30,16 +84,25 @@ type Summary struct {
 	Authors30d  int            `json:"authors_30d"`
 }
 
+// Run is the original entrypoint — writes to stdout/stderr.
 func Run(ctx context.Context, path string, client llm.Client, jsonOut bool) error {
-	fmt.Fprintln(os.Stderr, "Scanning repository...")
+	return RunWithSink(ctx, path, client, jsonOut, &stdoutSink{w: os.Stdout})
+}
+
+// RunWithSink runs analysis with all output going through the sink.
+func RunWithSink(ctx context.Context, path string, client llm.Client, jsonOut bool, sink Sink) error {
+	sink.Status("Scanning repository...")
 
 	data, err := Collect(ctx, path)
 	if err != nil {
 		return fmt.Errorf("collecting repo data: %w", err)
 	}
+	if ctx.Err() != nil {
+		return nil
+	}
 
-	fmt.Fprintf(os.Stderr, "Scanned %d files (%d source, %d tests) in %d goroutines\n",
-		len(data.Files), len(data.SourceFiles), len(data.TestFiles), 8)
+	sink.Status(fmt.Sprintf("Scanned %d files (%d source, %d tests)",
+		len(data.Files), len(data.SourceFiles), len(data.TestFiles)))
 
 	report := grade.FromData(data.ToGradeInput())
 
@@ -54,30 +117,73 @@ func Run(ctx context.Context, path string, client llm.Client, jsonOut bool) erro
 		Authors30d:  data.UniqueAuthors,
 	}
 
-	var narrative string
-	if client != nil {
-		fmt.Fprintf(os.Stderr, "Generating narrative with %s...\n", client.Name())
-		prompt := BuildPrompt(data, report)
-		narrative, err = client.Generate(ctx, prompt)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "LLM error (continuing without narrative): %v\n", err)
-		}
-	}
-
-	output := Output{
-		Summary:   summary,
-		Grade:     report,
-		Narrative: narrative,
-	}
-
+	// JSON mode: need full narrative before encoding
 	if jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(output)
+		var narrative string
+		if client != nil {
+			narrative, _ = client.Generate(ctx, BuildPrompt(data, report))
+		}
+		return json.NewEncoder(os.Stdout).Encode(Output{
+			Summary: summary, Grade: report, Narrative: narrative,
+		})
 	}
 
-	printReport(summary, report, data, narrative)
+	// Print the scorecard immediately
+	printScorecard(sink, summary, report, data)
+
+	// Stream narrative if LLM available
+	if client != nil {
+		sink.Status(fmt.Sprintf("Generating narrative with %s...", client.Name()))
+
+		lead := RenderAssessmentLead(scorecardTerminalWidth())
+		for _, line := range strings.Split(lead, "\n") {
+			sink.PrintStyled(line)
+		}
+		sink.PrintStyled("")
+
+		prompt := BuildPrompt(data, report)
+		var lineBuf strings.Builder
+
+		_, err = client.Stream(ctx, prompt, func(token string) {
+			for _, ch := range token {
+				if ch == '\n' {
+					sink.PrintMarkdown(lineBuf.String())
+					lineBuf.Reset()
+				} else {
+					lineBuf.WriteRune(ch)
+				}
+			}
+		})
+
+		// Flush last partial line
+		if lineBuf.Len() > 0 {
+			sink.PrintMarkdown(lineBuf.String())
+		}
+
+		if ctx.Err() == nil && err != nil {
+			sink.Error(fmt.Sprintf("LLM: %v", err))
+		}
+
+		sink.Print("")
+	}
+
+	sink.Finish("")
 	return nil
+}
+
+func scorecardTerminalWidth() int {
+	w := mdrender.TermWidth(80) - 6
+	if w < 52 {
+		return 52
+	}
+	return w
+}
+
+func printScorecard(sink Sink, summary Summary, report *grade.Report, data *RepoData) {
+	out := strings.TrimSuffix(RenderScorecard(summary, report, data, scorecardTerminalWidth()), "\n")
+	for _, line := range strings.Split(out, "\n") {
+		sink.PrintStyled(line)
+	}
 }
 
 func BuildPrompt(data *RepoData, report *grade.Report) string {
@@ -90,7 +196,6 @@ Be direct and specific. Roast what's bad, praise what's good. Reference actual n
 `)
 	b.WriteString(fmt.Sprintf("Overall: %d%% (%s)\n\n", int(report.OverallPct), report.Letter))
 
-	// Categories
 	for _, cat := range report.Categories {
 		b.WriteString(fmt.Sprintf("## %s (%.0f%%)\n", cat.Name, cat.Pct))
 		for _, s := range cat.Signals {
@@ -103,7 +208,6 @@ Be direct and specific. Roast what's bad, praise what's good. Reference actual n
 		b.WriteString("\n")
 	}
 
-	// File-level issues (most interesting ones)
 	issues := collectIssues(data.FileAnalyses)
 	if len(issues) > 0 {
 		b.WriteString("## Notable File Issues\n")
@@ -113,16 +217,15 @@ Be direct and specific. Roast what's bad, praise what's good. Reference actual n
 		b.WriteString("\n")
 	}
 
-	// High complexity files
-	var complex []FileAnalysis
+	var complexFiles []FileAnalysis
 	for _, f := range data.FileAnalyses {
 		if f.Complexity == "high" {
-			complex = append(complex, f)
+			complexFiles = append(complexFiles, f)
 		}
 	}
-	if len(complex) > 0 {
+	if len(complexFiles) > 0 {
 		b.WriteString("## High Complexity Files\n")
-		for _, f := range complex[:min(10, len(complex))] {
+		for _, f := range complexFiles[:min(10, len(complexFiles))] {
 			b.WriteString(fmt.Sprintf("  • %s (%d lines, %d functions)\n", f.Path, f.Lines, f.Functions))
 		}
 		b.WriteString("\n")
@@ -145,72 +248,6 @@ func collectIssues(analyses []FileAnalysis) []FileAnalysis {
 		withIssues = withIssues[:15]
 	}
 	return withIssues
-}
-
-func printReport(summary Summary, report *grade.Report, data *RepoData, narrative string) {
-	fmt.Println()
-	fmt.Println("╔══════════════════════════════════════════════╗")
-	fmt.Println("║  MAJORDOMO REPORT CARD                      ║")
-	fmt.Printf("║  Overall: %3d%% (%s)%-*s║\n", int(report.OverallPct), report.Letter, 37-len(report.Letter), "")
-	fmt.Println("╚══════════════════════════════════════════════╝")
-	fmt.Println()
-
-	// Languages
-	type langCount struct {
-		name  string
-		lines int
-	}
-	var langs []langCount
-	for k, v := range summary.Languages {
-		langs = append(langs, langCount{k, v})
-	}
-	sort.Slice(langs, func(i, j int) bool { return langs[i].lines > langs[j].lines })
-	var langStrs []string
-	for _, l := range langs {
-		if len(langStrs) >= 5 {
-			break
-		}
-		langStrs = append(langStrs, fmt.Sprintf("%s: %d", l.name, l.lines))
-	}
-	fmt.Printf("  %d files, %d lines\n", summary.TotalFiles, summary.TotalLines)
-	fmt.Printf("  Languages: %s\n", strings.Join(langStrs, ", "))
-	fmt.Printf("  %d commits by %d authors in last 30 days\n", summary.Commits30d, summary.Authors30d)
-	fmt.Printf("  %d TODOs/FIXMEs\n", summary.TODOs)
-	fmt.Println()
-
-	// Categories
-	for _, cat := range report.Categories {
-		filled := int(cat.Pct / 10)
-		empty := 10 - filled
-		bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
-		fmt.Printf("  %s [%s] %.0f%%\n", cat.Name, bar, cat.Pct)
-		for _, s := range cat.Signals {
-			icon := "  ✓"
-			if !s.Passed {
-				icon = "  ✗"
-			}
-			fmt.Printf("    %s %s — %s\n", icon, s.Name, s.Detail)
-		}
-		fmt.Println()
-	}
-
-	// File hotspots
-	var complex int
-	for _, f := range data.FileAnalyses {
-		if f.Complexity == "high" {
-			complex++
-		}
-	}
-	if complex > 0 {
-		fmt.Printf("  ⚠ %d high-complexity files detected\n\n", complex)
-	}
-
-	if narrative != "" {
-		fmt.Println("─── Assessment ───────────────────────────────")
-		fmt.Println()
-		fmt.Println(narrative)
-		fmt.Println()
-	}
 }
 
 // ToGradeInput converts collected data to the grade package's input format.
@@ -244,6 +281,6 @@ func (d *RepoData) ToGradeInput() *grade.Input {
 		DirectPushes:         d.DirectPushes,
 		UniqueAuthors:        d.UniqueAuthors,
 		DocRatio:             d.DocRatio,
-		ReadmeSize:           0, // filled separately if needed
+		ReadmeSize:           0,
 	}
 }

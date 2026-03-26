@@ -1,0 +1,362 @@
+{
+  "entries": [
+    {
+      "id": "tests-runbook-1774494458617",
+      "kind": "runbook",
+      "topic": "tests",
+      "summary": "Run tests with: make test (detected via Makefile)",
+      "source": "user_confirmed",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    },
+    {
+      "id": "build-runbook-1774494458962",
+      "kind": "runbook",
+      "topic": "build",
+      "summary": "Build with: go build ./...",
+      "source": "user_confirmed",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    },
+    {
+      "id": "docs-1774495705838",
+      "kind": "observation",
+      "topic": "docs",
+      "summary": "README",
+      "details": "README.md",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.83813871-05:00",
+      "updated_at": "2026-03-25T22:29:48.423240172-05:00"
+    },
+    {
+      "id": "docs-1774495705838",
+      "kind": "observation",
+      "topic": "docs",
+      "summary": "License",
+      "details": "LICENSE",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838139723-05:00",
+      "updated_at": "2026-03-25T22:29:48.423240338-05:00"
+    },
+    {
+      "id": "docs-1774495705838",
+      "kind": "observation",
+      "topic": "docs",
+      "summary": "Missing: Contributing guide",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838160878-05:00",
+      "updated_at": "2026-03-25T22:29:48.423241512-05:00"
+    },
+    {
+      "id": "docs-1774495705838",
+      "kind": "observation",
+      "topic": "docs",
+      "summary": "Missing: Changelog",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838162341-05:00",
+      "updated_at": "2026-03-25T22:29:48.423242024-05:00"
+    },
+    {
+      "id": "tests-1774495705838",
+      "kind": "observation",
+      "topic": "tests",
+      "summary": "Missing: Test files",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838163163-05:00",
+      "updated_at": "2026-03-25T22:29:48.423242302-05:00"
+    },
+    {
+      "id": "ci-1774495705838",
+      "kind": "observation",
+      "topic": "ci",
+      "summary": "Missing: CI configuration",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838163896-05:00",
+      "updated_at": "2026-03-25T22:29:48.423242543-05:00"
+    },
+    {
+      "id": "structure-1774495705838",
+      "kind": "observation",
+      "topic": "structure",
+      "summary": "Missing: Docker",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838164511-05:00",
+      "updated_at": "2026-03-25T22:29:48.423242954-05:00"
+    },
+    {
+      "id": "structure-1774495705838",
+      "kind": "observation",
+      "topic": "structure",
+      "summary": "Makefile",
+      "details": "Makefile",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.83816605-05:00",
+      "updated_at": "2026-03-25T22:29:48.423243097-05:00"
+    },
+    {
+      "id": "structure-1774495705838",
+      "kind": "observation",
+      "topic": "structure",
+      "summary": "Missing: .gitignore",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838166715-05:00",
+      "updated_at": "2026-03-25T22:29:48.423243423-05:00"
+    },
+    {
+      "id": "deps-1774495705838",
+      "kind": "observation",
+      "topic": "deps",
+      "summary": "Go module",
+      "details": "go.mod",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838167289-05:00",
+      "updated_at": "2026-03-25T22:29:48.423243611-05:00"
+    },
+    {
+      "id": "deps-1774495705838",
+      "kind": "observation",
+      "topic": "deps",
+      "summary": "Missing: Node package",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838168039-05:00",
+      "updated_at": "2026-03-25T22:29:48.423244045-05:00"
+    },
+    {
+      "id": "deps-1774495705838",
+      "kind": "observation",
+      "topic": "deps",
+      "summary": "Missing: Python project",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.83816878-05:00",
+      "updated_at": "2026-03-25T22:29:48.423244302-05:00"
+    },
+    {
+      "id": "deps-1774495705838",
+      "kind": "observation",
+      "topic": "deps",
+      "summary": "Missing: Rust crate",
+      "source": "scan",
+      "created_at": "2026-03-25T22:28:25.838169563-05:00",
+      "updated_at": "2026-03-25T22:29:48.423244621-05:00"
+    }
+  ],
+  "last_scan": "2026-03-25T22:29:48.418009421-05:00",
+  "last_report": {
+    "Path": ".",
+    "ScannedAt": "2026-03-25T22:29:48.418009421-05:00",
+    "Files": [
+      {
+        "Path": "LICENSE",
+        "Size": 1065,
+        "IsDir": false
+      },
+      {
+        "Path": "Makefile",
+        "Size": 1529,
+        "IsDir": false
+      },
+      {
+        "Path": "README.md",
+        "Size": 493,
+        "IsDir": false
+      },
+      {
+        "Path": "cmd/majordomo/main.go",
+        "Size": 1439,
+        "IsDir": false
+      },
+      {
+        "Path": "docs/ARCHITECTURE.md",
+        "Size": 12001,
+        "IsDir": false
+      },
+      {
+        "Path": "go.mod",
+        "Size": 1584,
+        "IsDir": false
+      },
+      {
+        "Path": "go.sum",
+        "Size": 7541,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/analyze/analyze.go",
+        "Size": 7642,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/analyze/collector.go",
+        "Size": 10547,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/commands/builtins.go",
+        "Size": 15917,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/commands/registry.go",
+        "Size": 5881,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/config/config.go",
+        "Size": 4104,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/grade/grade.go",
+        "Size": 7400,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/jobs/tracker.go",
+        "Size": 3959,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/knowledge/store.go",
+        "Size": 4565,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/llm/llm.go",
+        "Size": 3166,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/repo/repo.go",
+        "Size": 6281,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/scan/scan.go",
+        "Size": 6363,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/tui/chat.go",
+        "Size": 9991,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/tui/sink.go",
+        "Size": 1271,
+        "IsDir": false
+      },
+      {
+        "Path": "internal/worker/worker.go",
+        "Size": 3713,
+        "IsDir": false
+      }
+    ],
+    "Languages": {
+      ".go": 15,
+      ".md": 2,
+      ".mod": 1,
+      ".sum": 1
+    },
+    "HasReadme": true,
+    "HasTests": false,
+    "HasCI": false,
+    "HasLicense": true,
+    "HasDocker": false,
+    "HasMakefile": true,
+    "GitRemote": "git@github.com:julython/majordomo.git",
+    "RecentCommits": null,
+    "Signals": [
+      {
+        "Category": "docs",
+        "Key": "has_readme",
+        "Label": "README",
+        "Present": true,
+        "Details": "README.md"
+      },
+      {
+        "Category": "docs",
+        "Key": "has_license",
+        "Label": "License",
+        "Present": true,
+        "Details": "LICENSE"
+      },
+      {
+        "Category": "docs",
+        "Key": "has_contributing",
+        "Label": "Contributing guide",
+        "Present": false,
+        "Details": ""
+      },
+      {
+        "Category": "docs",
+        "Key": "has_changelog",
+        "Label": "Changelog",
+        "Present": false,
+        "Details": ""
+      },
+      {
+        "Category": "tests",
+        "Key": "has_tests",
+        "Label": "Test files",
+        "Present": false,
+        "Details": ""
+      },
+      {
+        "Category": "ci",
+        "Key": "has_ci",
+        "Label": "CI configuration",
+        "Present": false,
+        "Details": ""
+      },
+      {
+        "Category": "structure",
+        "Key": "has_docker",
+        "Label": "Docker",
+        "Present": false,
+        "Details": ""
+      },
+      {
+        "Category": "structure",
+        "Key": "has_makefile",
+        "Label": "Makefile",
+        "Present": true,
+        "Details": "Makefile"
+      },
+      {
+        "Category": "structure",
+        "Key": "has_gitignore",
+        "Label": ".gitignore",
+        "Present": false,
+        "Details": ""
+      },
+      {
+        "Category": "deps",
+        "Key": "has_go_mod",
+        "Label": "Go module",
+        "Present": true,
+        "Details": "go.mod"
+      },
+      {
+        "Category": "deps",
+        "Key": "has_package_json",
+        "Label": "Node package",
+        "Present": false,
+        "Details": ""
+      },
+      {
+        "Category": "deps",
+        "Key": "has_pyproject",
+        "Label": "Python project",
+        "Present": false,
+        "Details": ""
+      },
+      {
+        "Category": "deps",
+        "Key": "has_cargo",
+        "Label": "Rust crate",
+        "Present": false,
+        "Details": ""
+      }
+    ]
+  }
+}

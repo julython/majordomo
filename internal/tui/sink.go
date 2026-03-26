@@ -26,6 +26,11 @@ func NewStreamSink(p *tea.Program) *StreamSink {
 	return &StreamSink{p: p}
 }
 
+// OpenConfig triggers the interactive config editor
+func (s *StreamSink) OpenConfig() {
+	s.p.Send(switchToConfigMsg{})
+}
+
 func (s *StreamSink) Print(text string) {
 	s.p.Send(cmdOutputMsg{line: text})
 }

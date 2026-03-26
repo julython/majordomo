@@ -23,14 +23,28 @@ majordomo/
 │   ├── analyze/
 │   │   ├── collector.go            # Parallel data collection engine
 │   │   └── analyze.go              # Run pipeline, LLM prompt builder, report printer
+│   ├── commands/
+│   │   ├── registry.go            # Command registry, parsing, and Sink interface
+│   │   └── builtins.go            # Built-in command implementations
 │   ├── config/
 │   │   └── config.go               # TOML config, keyring auth, device flow login, setup
 │   ├── grade/
 │   │   └── grade.go                # Scoring engine (pure data in, scorecard out)
+│   ├── jobs/
+│   │   └── tracker.go              # Cancellable job lifecycle management
+│   ├── knowledge/
+│   │   └── store.go                # On-disk knowledge base (.majordomo/knowledge.json)
 │   ├── llm/
 │   │   └── llm.go                  # Remote LLM client with auto-detection
+│   ├── mdrender/
+│   │   └── mdrender.go             # Terminal markdown rendering with Glamour
 │   ├── repo/
 │   │   └── repo.go                 # File system operations, grep, git helpers
+│   ├── tui/
+│   │   ├── app.go                 # Main TUI app with Chat/Config mode switching
+│   │   ├── chat.go                # Chat interface with command execution and markdown
+│   │   ├── config.go              # Interactive configuration editor
+│   │   └── sink.go                # TUI StreamSink and CLI CLISink implementations
 │   └── worker/
 │       └── worker.go               # Server poll loop for remote jobs
 └── install.sh                      # curl-pipe installer
@@ -113,9 +127,27 @@ Each signal produces a `Signal{Name, Passed, Detail}`. The category score is the
 
 ## LLM Integration
 
-The `llm.Client` interface has one method: `Generate(ctx, prompt) (string, error)`. The single implementation (`Remote`) speaks the OpenAI-compatible `/v1/chat/completions` endpoint, which ollama, LM Studio, and llama.cpp all expose.
+The `llm.Client` interface supports both batch and streaming generation:
 
-Auto-detection probes localhost ports 11434 (ollama), 1234 (LM Studio), and 8080 (llama.cpp) with a 2-second timeout. The first to respond wins. If nothing is found, the tool runs in stats-only mode — the scorecard still works, just without the narrative.
+```go
+type Client interface {
+    Generate(ctx context.Context, prompt string) (string, error)
+    Stream(ctx context.Context, prompt string, onChunk func(token string)) (string, error)
+    Name() string
+}
+```
+
+The `LocalClient` implementation speaks the OpenAI-compatible `/v1/chat/completions` endpoint, which ollama, LM Studio, and llama.cpp all expose. It auto-detects local LLM servers by probing localhost ports:
+
+| Provider   | Port  | Default Model |
+|------------|-------|---------------|
+| ollama     | 11434 | llama3.2      |
+| LM Studio  | 1234  | default       |
+| llama.cpp  | 8080  | default       |
+
+Each probe has a 2-second timeout. The first to respond wins. If nothing is found, the tool runs in stats-only mode — the scorecard still works, just without the narrative.
+
+**Streaming:** The `Stream()` method enables token-by-token rendering. The TUI buffers tokens until a newline, then calls `PrintMarkdown()` for smooth progressive display. If no callback is provided, `Stream()` falls back to `Generate()` behavior.
 
 The prompt sent to the LLM contains the full scorecard with pass/fail signals, notable file-level issues (lint suppression, oversized files), and high-complexity file listings. The LLM's only job is to write a readable report card from this structured input.
 
@@ -196,6 +228,8 @@ The token scopes which repos a worker can claim jobs for. The server enforces th
 
 ## Distribution
 
+**Launch modes:** Running `majordomo` with no arguments starts the interactive TUI. Providing arguments (e.g., `majordomo analyze .`) runs in CLI mode.
+
 The binary is pure Go with no CGO dependencies, making cross-compilation trivial. Release builds target:
 
 - `darwin-amd64` (Intel Mac)
@@ -218,3 +252,167 @@ The install script detects the platform, downloads the correct binary to `~/.loc
 The mobile app is a read-and-decide interface, not a compute node. It receives push notifications when a PR triage report needs attention, displays the worker's pre-computed analysis (score, signals, narrative), and provides action buttons (close, request changes, ask, approve) that hit the server API, which talks to the GitHub API.
 
 The app never runs inference, clones repos, or does file system analysis. It is a thin REST client over the same API the dashboard uses.
+
+## Job Tracker
+
+The `jobs.Tracker` manages cancellable job lifecycles for long-running operations. Both the CLI probe runner and the watch worker use this.
+
+```go
+type Job struct {
+    ID        string
+    Kind      string
+    Status    Status  // pending, running, done, failed, cancelled
+    StartedAt time.Time
+    EndedAt   time.Time
+    Error     string
+}
+```
+
+**Lifecycle:**
+
+```
+Start() ──► context + cancel func ──► [work runs] ──► Complete() or Cancel()
+              │                                                 │
+              └───────────────── context cancel ───────────────┘
+```
+
+**Key methods:**
+
+- `Start(ctx, id, kind)` — registers a job, returns a cancellable context
+- `Complete(id, err)` — marks done/failed, cleans up cancel func
+- `Cancel(id)` — stops a running job, marks it cancelled
+- `CancelAll()` — stops all jobs (used on shutdown/Ctrl+C)
+- `Prune(olderThan)` — removes old completed jobs from memory
+
+Jobs track their own cancellation via a `context.CancelFunc`. When cancelled, the context propagates to `exec.CommandContext`, HTTP calls, and LLM generation — no per-subsystem cancellation needed.
+
+## Knowledge Store
+
+The knowledge store persists learned context about a repository at `.majordomo/knowledge.json`. It tracks observations, suggestions, and resolved items across analysis runs.
+
+```go
+type Entry struct {
+    Kind      string    // "observation", "suggestion", "resolved", "note"
+    Topic     string    // "docs", "tests", "ci", "deps", "structure"
+    Summary   string    // one-line human readable
+    Details   string    // optional extended info
+    Source    string    // "scan", "llm", "user"
+    Resolved  bool
+    Tags      []string
+}
+
+type Store struct {
+    Entries    []Entry
+    LastScan   time.Time
+    LastReport json.RawMessage  // most recent scan.Report
+}
+```
+
+**Methods:**
+
+- `Open(repoRoot)` — opens or creates `.majordomo/knowledge.json`
+- `Add(entry)` — adds entry, deduplicates by topic+summary
+- `Resolve(id)` — marks a suggestion as done
+- `Lookup(topic, kind)` — filter entries by topic and/or kind
+- `OpenSuggestions()` — returns unresolved suggestions
+- `ForLLM()` — formats all entries as LLM context string
+- `Stats()` — returns (total, open, resolved) counts
+
+**Topics:** `ci`, `docs`, `tests`, `deps`, `structure`
+
+The store migrates legacy format (bare array) automatically on load. Entries are never deleted by the tool — only explicitly via `/forget` or user action.
+
+## Markdown Rendering
+
+The `mdrender` package provides terminal-optimized markdown rendering via [Glamour](https://github.com/charmbracelet/glamour).
+
+**Key functions:**
+
+- `NewRenderer(wordWrap)` — creates a `*glamour.TermRenderer` with configured width
+- `TermWidth(fallback)` — detects terminal width, falls back to given value
+- `IndentEachLine(prefix, s)` — indents each line for chat gutter alignment
+
+**Terminal detection:**
+
+The renderer auto-selects light or dark theme without using OSC queries that conflict with Bubble Tea. It uses `COLORFGBG` environment variable — background color index 7–15 indicates light terminal.
+
+**Inline code style:** Backtick-delimited code is enhanced with bold styling for clarity in the TUI.
+
+## TUI Interface
+
+The TUI provides an interactive terminal interface built with [Bubble Tea](https://github.com/charmbracelet/bubbletea). It shares the same command registry as the CLI but renders output in a chat-style interface.
+
+```
+┌─────────────────────────────────────────────────────┐
+│ majordomo                                          │
+├─────────────────────────────────────────────────────┤
+│ ❯ /analyze .                                       │
+│   Running /analyze...                              │
+│   Analyzing...                                     │
+│   ## Analysis Complete                            │
+│   Score: 72/100                                    │
+│                                                     │
+│ ❯ _                                                │
+└─────────────────────────────────────────────────────┘
+```
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                        App                              │
+│  (mode: Chat | Config)                                  │
+│         │                         │                     │
+│         ▼                         ▼                     │
+│    ┌─────────┐            ┌───────────────┐             │
+│    │  Chat   │            │ ConfigEditor  │             │
+│    │ (chat)  │            │   (form)      │             │
+│    └────┬────┘            └───────────────┘             │
+│         │                                               │
+│         ▼                                               │
+│  ┌─────────────────────────────────────────┐           │
+│  │           commands.Registry              │           │
+│  │   (shared between CLI and TUI)          │           │
+│  └─────────────────────────────────────────┘           │
+│         │                                               │
+│         ▼                                               │
+│  ┌─────────────────────────────────────────┐           │
+│  │              Sink interface              │           │
+│  │   Print | PrintMarkdown | Status | Error │           │
+│  └─────────────────────────────────────────┘           │
+│         │                       │                       │
+│         ▼                       ▼                       │
+│  ┌─────────────┐        ┌─────────────┐                │
+│  │ StreamSink  │        │  CLISink    │                │
+│  │ (TUI only)  │        │  (stdout)   │                │
+│  └─────────────┘        └─────────────┘                │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Components:**
+
+- **App** (`app.go`): Root model managing mode switching between Chat and ConfigEditor using Bubble Tea's Elm architecture
+- **Chat** (`chat.go`): Interactive chat interface with command input, markdown rendering, autocomplete, command history (↑/↓), and cancellation (Ctrl+C/Esc)
+- **ConfigEditor** (`config.go`): Form-based configuration editor for server URL, LLM provider, model, and endpoint
+- **Sink interface** (`sink.go`): Abstracts output rendering; `StreamSink` sends messages to the TUI event loop, `CLISink` writes directly to stdout
+
+**Command Execution:**
+
+Commands are invoked via `/command` syntax. The TUI:
+1. Parses input against the shared `commands.Registry`
+2. Spawns a goroutine to run the command with a cancellable context
+3. Writes output to the appropriate `Sink` implementation
+4. Handles Ctrl+C/Esc cancellation by calling the context cancel function
+
+**Sinks:**
+
+The `Sink` interface enables commands to run identically in both CLI and TUI modes:
+
+| Method        | StreamSink (TUI)              | CLISink (CLI)           |
+|---------------|-------------------------------|-------------------------|
+| `Print`       | Appends chat message          | Writes to stdout        |
+| `PrintMarkdown` | Renders markdown inline      | Glamour-rendered stdout |
+| `Status`      | Shows spinner text            | Writes to stderr        |
+| `Error`       | Styled error message          | Writes "error:" to stderr |
+
+The CLI (`majordomo analyze .`) uses `CLISink` for direct stdout output. The TUI (`majordomo`) uses `StreamSink` to send messages through Bubble Tea's event loop, keeping the UI responsive during long-running commands.

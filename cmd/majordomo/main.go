@@ -69,14 +69,14 @@ func main() {
 }
 
 func runInteractive(reg *commands.Registry) {
-	c := tui.NewChat(reg)
-	chat := &c
+	app := tui.NewApp(reg)
 	p := tea.NewProgram(
-		chat,
+		app,
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
-	chat.SetProgram(p)
+	// Set the program reference for the chat component
+	app.SetProgram(p)
 
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

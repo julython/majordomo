@@ -135,6 +135,13 @@ func (c *Chat) SetProgram(p *tea.Program) {
 	c.program = p
 }
 
+// ClearRunningState resets the command execution state
+func (c *Chat) ClearRunningState() {
+	c.running = false
+	c.cancelFn = nil
+	c.status = ""
+}
+
 func (c *Chat) Init() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink,

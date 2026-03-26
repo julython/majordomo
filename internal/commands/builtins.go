@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/julython/majordomo/internal/analyze"
+	"github.com/julython/majordomo/internal/config"
 	"github.com/julython/majordomo/internal/jobs"
 	"github.com/julython/majordomo/internal/knowledge"
 	"github.com/julython/majordomo/internal/llm"
@@ -33,6 +34,7 @@ func RegisterAll(r *Registry, deps *Deps) {
 	r.Register(cancelCommand(deps))
 	r.Register(modelCommand(deps))
 	r.Register(loginCommand(deps))
+	r.Register(configCommand(deps))
 	r.Register(clearCommand())
 	r.Register(quitCommand())
 
@@ -560,6 +562,66 @@ func loginCommand(deps *Deps) *Command {
 			return nil
 		},
 	}
+}
+
+func configCommand(deps *Deps) *Command {
+	return &Command{
+		Name:        "config",
+		Aliases:     []string{"cfg", "settings"},
+		Description: "Open interactive configuration editor",
+		Usage:       "/config [--show] [--reset]",
+		Category:    "config",
+		Args: []Arg{
+			{Name: "show", Short: "s", Description: "Show current config (no editor)", IsFlag: true},
+			{Name: "reset", Short: "r", Description: "Reset to defaults", IsFlag: true},
+		},
+		Run: func(ctx context.Context, args ParsedArgs, sink Sink) error {
+			cfg, err := config.Load("")
+			if err != nil {
+				cfg = config.Default()
+			}
+
+			// Reset to defaults
+			if args.Flags["reset"] == "true" {
+				cfg = config.Default()
+				if err := config.Save(cfg); err != nil {
+					sink.Error(fmt.Sprintf("Failed to save config: %v", err))
+					return nil
+				}
+				sink.Print("✓ Config reset to defaults")
+				sink.Print("")
+				showConfig(sink, cfg)
+				return nil
+			}
+
+			// Show only (non-interactive)
+			if args.Flags["show"] == "true" {
+				showConfig(sink, cfg)
+				return nil
+			}
+
+			// Check if we're in TUI mode - if so, open the interactive editor
+			if streamSink, ok := sink.(interface{ OpenConfig() }); ok {
+				streamSink.OpenConfig()
+				return nil
+			}
+
+			// CLI mode - just show the config
+			sink.Print("Current configuration:")
+			sink.Print("")
+			showConfig(sink, cfg)
+			sink.Print("")
+			sink.Print("To edit: use --show, --reset, or edit ~/.config/majordomo/config.toml")
+			return nil
+		},
+	}
+}
+
+func showConfig(sink Sink, cfg *config.Config) {
+	sink.Print(fmt.Sprintf("  server.url      = %s", cfg.Server.URL))
+	sink.Print(fmt.Sprintf("  llm.provider    = %s", cfg.LLM.Provider))
+	sink.Print(fmt.Sprintf("  llm.model       = %s", cfg.LLM.Model))
+	sink.Print(fmt.Sprintf("  llm.url         = %s", cfg.LLM.URL))
 }
 
 func quitCommand() *Command {

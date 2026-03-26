@@ -8,6 +8,7 @@ default: help
 setup:  ## Setup project, install dev tools, and vendor assets
 	go install gotest.tools/gotestsum@latest
 	go mod tidy
+	go run ./cmd/majordomo setup
 
 dev:  ## Run the tool locally
 	go run ./cmd/majordomo $(args)

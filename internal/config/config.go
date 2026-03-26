@@ -31,8 +31,8 @@ type LLMConfig struct {
 
 func Default() *Config {
 	return &Config{
-		Server: ServerConfig{URL: "https://api.majordomo.dev"},
-		LLM:    LLMConfig{Provider: "auto", Model: "llama3", URL: "http://localhost:11434"},
+		Server: ServerConfig{URL: "https://julython.org"},
+		LLM:    LLMConfig{Provider: "auto", Model: "llama3.2", URL: "http://localhost:11434"},
 	}
 }
 

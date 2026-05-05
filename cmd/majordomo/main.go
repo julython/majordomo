@@ -14,6 +14,7 @@ import (
 	"github.com/julython/majordomo/internal/jobs"
 	"github.com/julython/majordomo/internal/knowledge"
 	"github.com/julython/majordomo/internal/llm"
+	"github.com/julython/majordomo/internal/mcp"
 	"github.com/julython/majordomo/internal/tui"
 )
 
@@ -50,6 +51,16 @@ func main() {
 	// No args → interactive chat
 	if len(os.Args) < 2 {
 		runInteractive(reg)
+		return
+	}
+
+	// MCP mode
+	if os.Args[1] == "mcp" {
+		transport := mcp.NewTransport(repoDir)
+		if err := transport.Run(context.Background()); err != nil {
+			slog.Error("MCP server error", "error", err)
+			os.Exit(1)
+		}
 		return
 	}
 

@@ -36,6 +36,9 @@ majordomo/
 │   │   └── store.go                # On-disk knowledge base (.majordomo/knowledge.json)
 │   ├── llm/
 │   │   └── llm.go                  # Remote LLM client with auto-detection
+│   ├── mcp/
+│   │   ├── server.go              # MCP server with tool definitions
+│   │   └── transport.go           # Stdio JSON-RPC transport
 │   ├── mdrender/
 │   │   └── mdrender.go             # Terminal markdown rendering with Glamour
 │   ├── repo/
@@ -416,3 +419,34 @@ The `Sink` interface enables commands to run identically in both CLI and TUI mod
 | `Error`       | Styled error message          | Writes "error:" to stderr |
 
 The CLI (`majordomo analyze .`) uses `CLISink` for direct stdout output. The TUI (`majordomo`) uses `StreamSink` to send messages through Bubble Tea's event loop, keeping the UI responsive during long-running commands.
+
+## MCP Server
+
+Majordomo can run as an MCP (Model Context Protocol) server, exposing its tools to AI assistants for repository analysis.
+
+```bash
+majordomo mcp
+```
+
+**Transport:** Stdio-based JSON-RPC communication (stdin/stdout). Compatible with Claude Code, Cursor, and other MCP clients.
+
+**Tools:**
+
+| Tool       | Description                                      |
+|------------|--------------------------------------------------|
+| `analyze`  | Scan and grade repository, return structured results |
+| `knowledge`| Show learned observations and suggestions         |
+| `status`   | Show running jobs                                |
+| `setup`    | Initialize majordomo for a repository            |
+
+**Usage example:**
+
+```json
+// List tools
+{"jsonrpc": "2.0", "method": "tools/list", "id": 1}
+
+// Call analyze
+{"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "analyze", "arguments": {"path": ".", "no_llm": true}}, "id": 2}
+```
+
+**Tool output:** Commands run via `exec.Command` with JSON output, then parsed and formatted as readable text for the agent.

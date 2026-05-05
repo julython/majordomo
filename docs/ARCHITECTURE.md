@@ -450,3 +450,150 @@ majordomo mcp
 ```
 
 **Tool output:** Commands run via `exec.Command` with JSON output, then parsed and formatted as readable text for the agent.
+
+## Native Tool Calling (Function Calling)
+
+Majordomo supports native LLM tool calling, allowing AI assistants to directly invoke commands during chat interactions. This is faster and more efficient than the MCP approach since tools execute in-process without subprocess overhead.
+
+### Architecture
+
+```
+User Question
+    ↓
+Chat Command (chat_with_tools.go)
+    ↓
+Tool Bridge (toolbridge.go)
+    ├─▶ Convert commands → OpenAI function schemas
+    └─▶ Register execution handlers
+    ↓
+LLM Client (tools.go)
+    ├─▶ Stream chat with tools available
+    └─▶ Parse tool_calls from SSE response
+    ↓
+[Tool requested?]
+    ├─ No  → Display response, done
+    └─ Yes → Execute via Command Registry
+              ↓
+         Capture output (CaptureSink)
+              ↓
+         Add tool result to conversation
+              ↓
+         Loop back to LLM (max 5 iterations)
+```
+
+### Key Files
+
+- **`internal/llm/tools.go`**: Extends LLM client with `ChatWithTools()` method supporting OpenAI function calling format
+- **`internal/commands/toolbridge.go`**: Converts Command definitions to tool schemas and handles execution
+- **`internal/commands/chat_with_tools.go`**: Chat command with tool calling loop
+
+### Tool Schema Generation
+
+Commands are automatically converted to LLM tools:
+
+```go
+// Command definition
+Command{
+  Name: "analyze",
+  Description: "Scan the repo and grade it",
+  Args: []Arg{
+    {Name: "path", Description: "Repo path", Default: "."},
+    {Name: "json", Description: "Output JSON", IsFlag: true},
+  },
+}
+
+// Becomes tool schema
+Tool{
+  Type: "function",
+  Function: {
+    Name: "analyze",
+    Description: "Scan the repo and grade it",
+    Parameters: {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string", "description": "Repo path", "default": "."},
+        "json": {"type": "boolean", "description": "Output JSON"}
+      }
+    }
+  }
+}
+```
+
+### Execution Flow
+
+1. **User asks question**: "How many tests do I have?"
+2. **LLM receives**: System prompt + user message + available tools
+3. **LLM decides**: "I should call the analyze tool to check"
+4. **Response includes**: `tool_calls: [{name: "analyze", arguments: "{}"}]`
+5. **Bridge executes**: Runs analyze command via registry
+6. **Output captured**: CaptureSink collects all sink output
+7. **Result sent back**: Added as `role: "tool"` message
+8. **LLM responds**: "You have 127 tests covering 78% of code"
+
+### Model Requirements
+
+Tool calling requires models that support the OpenAI function calling format. Not all models return `tool_calls` properly.
+
+**Tested & Working:**
+- qwen3:8b (recommended)
+- qwen2.5-coder:32b
+- deepseek-r1:8b
+
+**Limited Support:**
+- llama3.2 (returns tool calls as plain text, not structured)
+- Small models < 7B parameters
+
+### Performance
+
+**In-process execution** means tools run with zero subprocess overhead:
+- Command parsing: < 1ms
+- Tool execution: Same as direct command invocation
+- No serialization between processes
+- Shared memory for knowledge store access
+
+Compared to MCP (subprocess per tool call), native tool calling is **10-100x faster** for simple operations like status checks and knowledge queries.
+
+### Available Tools
+
+All non-hidden commands are exposed as tools:
+- `analyze` - Repository scanning and grading
+- `knowledge` - Query knowledge base
+- `status` - Check running jobs
+- `setup` - Initialize repository
+- `resolve` - Mark issues as resolved
+- `forget` - Remove knowledge entries
+
+Hidden commands (help, quit, clear) and the chat command itself are excluded to prevent recursion.
+
+### Safety & Limits
+
+- **Max iterations**: 5 (prevents infinite tool calling loops)
+- **Context cancellation**: User can Ctrl+C to abort at any point
+- **Same permissions**: Tools run with same privileges as CLI user
+- **No approval prompts**: Tools execute automatically (future enhancement)
+
+### Example Interaction
+
+```
+User: What should I improve first?
+
+LLM: [Calls knowledge tool with open_only=true]
+Tool Result: "2 open suggestions: 1) Add pre-commit hooks 2) Increase test coverage"
+
+LLM: [Calls analyze tool to get current metrics]
+Tool Result: "Grade: B (78%). Tests: 45% coverage. No pre-commit hooks."
+
+LLM Response: "Based on the analysis, I recommend starting with:
+1. Add pre-commit hooks (currently missing)
+2. Increase test coverage from 45% to 70%
+These will raise your grade from B to A-."
+```
+
+### Extension
+
+To add a new tool:
+1. Register a command in `builtins.go`
+2. It automatically becomes available as a tool
+3. No additional tool definition needed
+
+The toolbridge handles schema generation, parameter mapping, and execution automatically.

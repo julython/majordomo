@@ -25,7 +25,7 @@ func RegisterAll(r *Registry, deps *Deps) {
 	r.Register(helpCommand(r))
 	r.Register(setupCommand(deps))
 	r.Register(analyzeCommand(deps))
-	r.Register(chatCommand(deps))
+	r.Register(chatWithToolsCommand(deps, r))
 	r.Register(statusCommand(deps))
 	r.Register(knowledgeCommand(deps))
 	r.Register(resolveCommand(deps))

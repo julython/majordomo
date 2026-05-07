@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	ctx "github.com/julython/repomap/context"
 	"github.com/julython/repomap/graph"
 	"github.com/julython/repomap/indexer"
+	"github.com/julython/repomap/planner"
 )
 
 func main() {
@@ -29,6 +31,10 @@ func main() {
 		cmdContext()
 	case "prompt":
 		cmdPrompt()
+	case "plan":
+		cmdPlan()
+	case "exec":
+		cmdExec()
 	case "refs":
 		cmdRefs()
 	case "files":
@@ -48,11 +54,18 @@ Usage:
   repomap symbols [path] [query]               Search symbols by name
   repomap context [path] [symbol]              Show assembled context (human-readable)
   repomap prompt  [path] [symbol] [task]       Show the LLM-ready prompt for an edit
+  repomap plan    [path] [task...]             Generate a planning prompt for a task
+  repomap exec    [path] [plan.json]           Generate execution prompts for each plan step
   repomap refs    [path] [symbol]              Show who calls a symbol and what it calls
   repomap files   [path]                       List indexed files with symbol counts
 
+Workflow:
+  1. repomap plan "add webhook support" > planning_prompt.txt
+  2. cat planning_prompt.txt | ollama run devstral-small > plan.json
+  3. repomap exec plan.json                    # prints execution prompts per step
+
 Options:
-  REPOMAP_BUDGET=N  Set token budget (default 4096). Example: REPOMAP_BUDGET=8192 repomap prompt ...
+  REPOMAP_BUDGET=N  Set token budget (default 4096).
 
 If path is omitted, uses current directory.`)
 }
@@ -284,6 +297,117 @@ func getBudget() ctx.Budget {
 		}
 	}
 	return budget
+}
+
+func cmdPlan() {
+	// Parse: repomap plan [path] <task...>
+	// The task is everything after the path (or after "plan" if no path)
+	root := ""
+	taskStart := 2
+
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: repomap plan [path] <task description>")
+		os.Exit(1)
+	}
+
+	// Check if arg 2 is a directory (path) or part of the task
+	if info, err := os.Stat(os.Args[2]); err == nil && info.IsDir() {
+		root = repoRoot(os.Args[2])
+		taskStart = 3
+	} else {
+		root = repoRoot(".")
+	}
+
+	if taskStart >= len(os.Args) {
+		fmt.Fprintln(os.Stderr, "usage: repomap plan [path] <task description>")
+		os.Exit(1)
+	}
+
+	task := strings.Join(os.Args[taskStart:], " ")
+
+	idx := buildGraph(root)
+	p := planner.NewPlanner(idx.Graph, root)
+	p.Budget = getBudget()
+
+	fmt.Print(p.BuildPlanningPrompt(task))
+}
+
+func cmdExec() {
+	// Parse: repomap exec [path] <plan.json>
+	// plan.json can be a file path or "-" for stdin
+	root := ""
+	planArg := ""
+
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "usage: repomap exec [path] <plan.json | ->")
+		os.Exit(1)
+	}
+
+	if len(os.Args) >= 4 {
+		root = repoRoot(os.Args[2])
+		planArg = os.Args[3]
+	} else {
+		root = repoRoot(".")
+		planArg = os.Args[2]
+	}
+
+	// Read plan from file or stdin
+	var planData []byte
+	var err error
+	if planArg == "-" {
+		planData, err = io.ReadAll(os.Stdin)
+	} else {
+		planData, err = os.ReadFile(planArg)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading plan: %v\n", err)
+		os.Exit(1)
+	}
+
+	plan, err := planner.ParsePlan(string(planData))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error parsing plan: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Print the plan summary
+	fmt.Fprintf(os.Stderr, "%s\n", plan)
+
+	// Build the graph and generate execution prompts
+	idx := buildGraph(root)
+	p := planner.NewPlanner(idx.Graph, root)
+	p.Budget = getBudget()
+
+	for i, step := range plan.Steps {
+		fmt.Fprintf(os.Stderr, "--- Step %d/%d: [%s] %s ---\n",
+			i+1, len(plan.Steps), step.Action, step.Target)
+
+		if step.Action == planner.ActionRun {
+			fmt.Printf("## Step %d: Run\n$ %s\n\n", i+1, step.Command)
+			continue
+		}
+
+		if step.Action == planner.ActionDelete {
+			prompt, err := p.BuildStepPrompt(step)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  error: %v\n", err)
+				continue
+			}
+			fmt.Printf("## Step %d: Delete\n%s\n", i+1, prompt)
+			continue
+		}
+
+		prompt, err := p.BuildStepPrompt(step)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  error: %v (skipping)\n", err)
+			continue
+		}
+
+		fmt.Printf("## Step %d: %s %s\n", i+1, step.Action, step.Target)
+		fmt.Println(prompt)
+		fmt.Println("---")
+		fmt.Println()
+	}
 }
 
 func cmdRefs() {

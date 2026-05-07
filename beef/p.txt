@@ -1,0 +1,579 @@
+You are a senior engineer planning changes to a codebase. Analyze the repository structure below and create a step-by-step plan.
+
+## Available operations
+- modify: edit an existing function/class/type
+- create: create a new file
+- add: add a new function/class/type to an existing file
+- delete: remove a function/class/type
+- run: execute a shell command (tests, build)
+
+## Repository structure
+
+### beef/
+
+beef/main.go [go]
+   func main()
+   func usage()
+   func repoRoot(start string) string
+   func getPath() string
+   lastRefStats indexer.RefStats
+   func buildGraph(root string) *indexer.Indexer
+   func cmdIndex()
+   func cmdSymbols()
+   func cmdContext()
+   func cmdPrompt()
+   func parseSymbolArgs(cmd string) (root string, symbolQuery string)
+   func resolveTarget(idx *indexer.Indexer, query string) *graph.Symbol
+   func getBudget() ctx.Budget
+   func cmdPlan()
+   func cmdExec()
+   func cmdRefs()
+   func cmdFiles()
+
+### beef/context/
+
+beef/context/assembler.go [go]
+  + Budget
+  + DefaultBudget = Budget{MaxTokens: 4096}
+  + SymbolWithBody
+  + AssembledContext
+  + SymbolWithSig
+  + Assembler
+  + func NewAssembler(g *graph.Graph, root string) *Assembler
+  + func (a *Assembler) ForSymbol(target *graph.Symbol) (*AssembledContext, error)
+   func sigFromSymbol(s *graph.Symbol) SymbolWithSig
+   func (a *Assembler) collectDependencies(target *graph.Symbol) []SymbolWithSig
+   func (a *Assembler) collectDependents(target *graph.Symbol) []SymbolWithSig
+   func (a *Assembler) idsToSigs(ids []graph.SymbolID, exclude graph.SymbolID) []SymbolWithSig
+   func (a *Assembler) collectSiblings(target *graph.Symbol) []SymbolWithSig
+   func (a *Assembler) findExamples(target *graph.Symbol) []SymbolWithBody
+   func (a *Assembler) findTests(target *graph.Symbol) []SymbolWithBody
+   func (a *Assembler) readSymbolBody(sym *graph.Symbol) (string, error)
+   func nameSimilarity(a, b string) int
+   func signatureSimilarity(a, b string) int
+   func splitName(name string) []string
+   func extractTypeWords(sig string) []string
+   func (a *Assembler) estimateTokens(ctx *AssembledContext) int
+   func tokenEstimate(s string) int
+   func (a *Assembler) trim(ctx *AssembledContext)
+
+beef/context/prompt.go [go]
+  + Operation int
+  + OpReplace Operation = iota
+  + OpAdd
+  + OpExplain
+  + PromptOptions
+  + func RenderPrompt(ctx *AssembledContext, opts PromptOptions) string
+  + func RenderHuman(ctx *AssembledContext) string
+   func firstLine(s string) string
+
+### beef/graph/
+
+beef/graph/graph.go [go]
+  + Graph
+  + func New(root string) *Graph
+  + func (g *Graph) AddFile(f *FileNode)
+  + func (g *Graph) AddSymbol(s *Symbol)
+  + func (g *Graph) AddEdge(e Edge)
+  + func (g *Graph) RemoveFile(path string)
+  + func (g *Graph) LookupName(name string) []*Symbol
+  + func (g *Graph) FuzzyLookup(query string) []*Symbol
+  + func (g *Graph) SymbolsInFile(path string) []*Symbol
+  + func (g *Graph) SymbolsInPackage(pkg string) []*Symbol
+  + func (g *Graph) Dependents(id SymbolID) []SymbolID
+  + func (g *Graph) Dependencies(id SymbolID) []SymbolID
+  + func (g *Graph) Stats() GraphStats
+  + GraphStats
+  + func (s GraphStats) String() string
+   func filterSymbols(syms []*Symbol, remove map[SymbolID]bool) []*Symbol
+   func filterEdges(edges []Edge, remove map[SymbolID]bool) []Edge
+   func filterEdgeList(edges []Edge, remove map[SymbolID]bool) []Edge
+
+beef/graph/types.go [go]
+  + SymbolID string
+  + func NewSymbolID(file, name string) SymbolID
+  + Language int
+  + LangUnknown Language = iota
+  + LangGo
+  + LangPython
+  + LangTypeScript
+  + func (l Language) String() string
+  + SymbolKind int
+  + KindFunction SymbolKind = iota
+  + KindMethod
+  + KindType
+  + KindInterface
+  + KindStruct
+  + KindClass
+  + KindConst
+  + KindVar
+  + KindModule
+  + func (k SymbolKind) String() string
+  + EdgeKind int
+  + EdgeImports EdgeKind = iota
+  + EdgeDefines
+  + EdgeReferences
+  + EdgeImplements
+  + EdgeTests
+  + EdgeCoChanges
+  + func (e EdgeKind) String() string
+  + FileNode
+  + Import
+  + Symbol
+  + func (s *Symbol) BodyFrom(content []byte) string
+  + func (s *Symbol) SignatureOrFallback() string
+  + Edge
+  + func (s *Symbol) String() string
+
+### beef/indexer/
+
+beef/indexer/go_lang.go [go]
+  + GoExtractor
+  + func (g *GoExtractor) Language() graph.Language
+  + func (g *GoExtractor) Grammar() *tree_sitter.Language
+  + func (g *GoExtractor) Extract(path string, content []byte, root *tree_sitter.Node) (*ExtractionResult, error)
+   func (g *GoExtractor) extractImports(root *tree_sitter.Node, content []byte) []graph.Import
+   func (g *GoExtractor) extractFunction(path string, node *tree_sitter.Node, content []byte) *graph.Symbol
+   func (g *GoExtractor) extractMethod(path string, node *tree_sitter.Node, content []byte) *graph.Symbol
+   func (g *GoExtractor) extractTypeDecl(path string, node *tree_sitter.Node, content []byte) []*graph.Symbol
+   func (g *GoExtractor) extractConstVar(path string, node *tree_sitter.Node, content []byte, kind graph.SymbolKind) []*...
+   func isGoExported(name string) bool
+
+beef/indexer/indexer.go [go]
+  + Indexer
+  + func New(root string) *Indexer
+  + func (idx *Indexer) Close()
+  + func (idx *Indexer) Index() error
+  + func (idx *Indexer) IndexFile(relPath string) error
+  + func (idx *Indexer) ResolveImportEdges()
+   func (idx *Indexer) indexFile(relPath string, lang graph.Language) error
+   func (idx *Indexer) resolveImport(imp graph.Import, lang graph.Language, fromPath string) string
+   func (idx *Indexer) resolveGoImport(imp graph.Import) string
+   func (idx *Indexer) resolvePythonImport(imp graph.Import, fromPath string) string
+   func (idx *Indexer) resolveTSImport(imp graph.Import, fromPath string) string
+   func contentHash(content []byte) string
+
+beef/indexer/language.go [go]
+  + Extractor interface {
+  + ExtractionResult
+  + func DetectLanguage(path string) graph.Language
+  + func ShouldSkipDir(name string) bool
+   func childByKind(node *tree_sitter.Node, kind string) *tree_sitter.Node
+   func nodeText(node *tree_sitter.Node, content []byte) string
+   func prevSiblingComment(node *tree_sitter.Node, content []byte) string
+   func walkNodes(node *tree_sitter.Node, fn func(*tree_sitter.Node))
+   func extractSignatureLine(node *tree_sitter.Node, content []byte, bodyKind string) string
+
+beef/indexer/python.go [go]
+  + PythonExtractor
+  + func (p *PythonExtractor) Language() graph.Language
+  + func (p *PythonExtractor) Grammar() *tree_sitter.Language
+  + func (p *PythonExtractor) Extract(path string, content []byte, root *tree_sitter.Node) (*ExtractionResult, error)
+   func (p *PythonExtractor) extractImports(root *tree_sitter.Node, content []byte) []graph.Import
+   func (p *PythonExtractor) extractFunction(path string, node *tree_sitter.Node, content []byte, parent string) *graph....
+   func (p *PythonExtractor) extractClass(path string, node *tree_sitter.Node, content []byte) []*graph.Symbol
+   func (p *PythonExtractor) extractDecorated(path string, node *tree_sitter.Node, content []byte) []*graph.Symbol
+   func (p *PythonExtractor) extractDecoratedInner(path string, node *tree_sitter.Node, content []byte, parent string) [...
+   func (p *PythonExtractor) extractAssignment(path string, node *tree_sitter.Node, content []byte) *graph.Symbol
+   func (p *PythonExtractor) extractDocstring(node *tree_sitter.Node, content []byte) string
+   func pythonModuleName(path string) string
+   func isUpperSnakeCase(s string) bool
+
+beef/indexer/refs.go [go]
+  + RefStats
+  + func (s RefStats) String() string
+  + func (idx *Indexer) ResolveReferences() RefStats
+   rawRef
+   refKind int
+   refCall   refKind = iota
+   refType
+   refAccess
+   func enclosingSymbol(syms []*graph.Symbol, offset uint32) *graph.Symbol
+   func (idx *Indexer) resolveRef(ref rawRef, fromPath string, fromFile *graph.FileNode) graph.SymbolID
+   func (idx *Indexer) resolveQualifiedRef(ref rawRef, fromPath string, fromFile *graph.FileNode) graph.SymbolID
+   func extractGoRefs(root *tree_sitter.Node, content []byte) []rawRef
+   func extractPythonRefs(root *tree_sitter.Node, content []byte) []rawRef
+   func extractTSRefs(root *tree_sitter.Node, content []byte) []rawRef
+   func refFromExpr(node *tree_sitter.Node, content []byte, kind refKind) *rawRef
+   func isPythonBuiltinType(name string) bool
+   func isTSBuiltinType(name string) bool
+
+beef/indexer/typescript.go [go]
+  + TypeScriptExtractor
+  + func (t *TypeScriptExtractor) Language() graph.Language
+  + func (t *TypeScriptExtractor) Grammar() *tree_sitter.Language
+  + func (t *TypeScriptExtractor) Extract(path string, content []byte, root *tree_sitter.Node) (*ExtractionResult, error)
+   func (t *TypeScriptExtractor) extractNode(path string, node *tree_sitter.Node, content []byte, parent string, exporte...
+   func (t *TypeScriptExtractor) extractImports(root *tree_sitter.Node, content []byte) []graph.Import
+   func (t *TypeScriptExtractor) extractFunction(path string, node *tree_sitter.Node, content []byte, parent string, exp...
+   func (t *TypeScriptExtractor) extractClass(path string, node *tree_sitter.Node, content []byte, exported bool) []*gra...
+   func (t *TypeScriptExtractor) extractClassMethod(path string, node *tree_sitter.Node, content []byte, className strin...
+   func (t *TypeScriptExtractor) extractInterface(path string, node *tree_sitter.Node, content []byte, exported bool) *g...
+   func (t *TypeScriptExtractor) extractTypeAlias(path string, node *tree_sitter.Node, content []byte, exported bool) *g...
+   func (t *TypeScriptExtractor) extractEnum(path string, node *tree_sitter.Node, content []byte, exported bool) *graph....
+   func (t *TypeScriptExtractor) extractLexicalDecl(path string, node *tree_sitter.Node, content []byte, parent string, ...
+   func tsModuleName(path string) string
+
+### beef/planner/
+
+beef/planner/plan.go [go]
+  + Action string
+  + ActionModify Action = "modify"
+  + ActionCreate Action = "create"
+  + ActionAdd    Action = "add"
+  + ActionDelete Action = "delete"
+  + ActionRun    Action = "run"
+  + Step
+  + Plan
+  + func (p *Plan) String() string
+  + func ParsePlan(raw string) (*Plan, error)
+   func parseJSON(s string) (*Plan, error)
+   func repairJSON(s string) string
+   func parseLineBased(raw string) (*Plan, error)
+   func parseStepLine(s string) (Action, string, string)
+
+beef/planner/planner.go [go]
+  + Planner
+  + func NewPlanner(g *graph.Graph, root string) *Planner
+  + func (p *Planner) BuildPlanningPrompt(task string) string
+  + func (p *Planner) BuildStepPrompt(step Step) (string, error)
+   func (p *Planner) buildSkeleton() string
+   func (p *Planner) buildModifyPrompt(step Step) (string, error)
+   func (p *Planner) buildAddPrompt(step Step) (string, error)
+   func (p *Planner) buildCreatePrompt(step Step) (string, error)
+   func (p *Planner) buildDeletePrompt(step Step) (string, error)
+   func (p *Planner) findSymbol(name, file string) *graph.Symbol
+   func (p *Planner) findSimilarFile(targetPath string) string
+   func (p *Planner) langFence(file string) string
+   func dirOf(path string) string
+   func baseName(path string) string
+
+### cmd/majordomo/
+
+cmd/majordomo/main.go [go]
+   func main()
+   func runInteractive(reg *commands.Registry)
+
+### internal/analyze/
+
+internal/analyze/analyze.go [go]
+  + Sink interface {
+  + func (s *stdoutSink) Print(text string)
+  + func (s *stdoutSink) PrintStyled(line string)
+  + func (s *stdoutSink) Status(text string)
+  + func (s *stdoutSink) Error(text string)
+  + func (s *stdoutSink) Finish(summary string)
+  + func (s *stdoutSink) PrintMarkdown(text string)
+  + Output
+  + Summary
+  + func Run(ctx context.Context, path string, client llm.Client, jsonOut bool) error
+  + func RunWithSink(ctx context.Context, path string, client llm.Client, jsonOut bool, sink Sink) error
+  + func BuildPrompt(data *RepoData, report *grade.Report) string
+  + func (d *RepoData) ToGradeInput() *grade.Input
+   markdownRenderer interface {
+   stdoutSink
+   func scorecardTerminalWidth() int
+   func printScorecard(sink Sink, summary Summary, report *grade.Report, data *RepoData)
+   func collectIssues(analyses []FileAnalysis) []FileAnalysis
+
+internal/analyze/collector.go [go]
+  + RepoData
+  + CommitInfo
+  + FileAnalysis
+  + func Collect(ctx context.Context, root string) (*RepoData, error)
+   func analyzeFiles(ctx context.Context, root string, files []string) []FileAnalysis
+   func analyzeFile(root, path string) FileAnalysis
+   func countFunctions(content, ext string) int
+   func gitLog(root string, count int) []CommitInfo
+   conventionalRe = regexp.MustCompile(`^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?:`)
+   func isConventionalCommit(msg string) bool
+
+internal/analyze/scorecard.go [go]
+  + func RenderScorecard(summary Summary, report *grade.Report, data *RepoData, maxWidth int) string
+  + func RenderAssessmentLead(maxWidth int) string
+   langEntry
+   scPurple  = lipgloss.Color("#A78BFA")
+   scViolet  = lipgloss.Color("#7C3AED")
+   scCyan    = lipgloss.Color("#22D3EE")
+   scTeal    = lipgloss.Color("#2DD4BF")
+   scGreen   = lipgloss.Color("#4ADE80")
+   scLime    = lipgloss.Color("#A3E635")
+   scAmber   = lipgloss.Color("#FBBF24")
+   scOrange  = lipgloss.Color("#FB923C")
+   scRose    = lipgloss.Color("#FB7185")
+   scRed     = lipgloss.Color("#F87171")
+   scMuted   = lipgloss.Color("#94A3B8")
+   scDim     = lipgloss.Color("#64748B")
+   scWhite   = lipgloss.Color("#F1F5F9")
+   scIndigo  = lipgloss.Color("#818CF8")
+   scMagenta = lipgloss.Color("#E879F9")
+   gradeColors
+   func letterGradeColors(letter string) gradeColors
+   func pctBarColors(pct float64) (fill, empty lipgloss.Color)
+   func formatStatsBlock(summary Summary, innerW int) string
+   func formatInt(n int) string
+   func formatCategory(cat grade.CategoryGrade, innerW int) string
+
+### internal/commands/
+
+internal/commands/builtins.go [go]
+  + Deps
+  + func RegisterAll(r *Registry, deps *Deps)
+  + func (a *analyzeSinkAdapter) Print(text string)
+  + func (a *analyzeSinkAdapter) PrintMarkdown(text string)
+  + func (a *analyzeSinkAdapter) PrintStyled(line string)
+  + func (a *analyzeSinkAdapter) Status(text string)
+  + func (a *analyzeSinkAdapter) Error(text string)
+  + func (a *analyzeSinkAdapter) Finish(summary string)
+   func helpCommand(reg *Registry) *Command
+   func setupCommand(deps *Deps) *Command
+   func analyzeCommand(deps *Deps) *Command
+   analyzeSinkAdapter
+   func chatCommand(deps *Deps) *Command
+   func buildChatPrompt(message string, kb *knowledge.Store) string
+   func statusCommand(deps *Deps) *Command
+   func knowledgeCommand(deps *Deps) *Command
+   func resolveCommand(deps *Deps) *Command
+   func forgetCommand(deps *Deps) *Command
+   func watchCommand(deps *Deps) *Command
+   func cancelCommand(deps *Deps) *Command
+   func modelCommand(deps *Deps) *Command
+   func loginCommand(deps *Deps) *Command
+   func quitCommand() *Command
+   func clearCommand() *Command
+
+internal/commands/registry.go [go]
+  + Arg
+  + Command
+  + ParsedArgs
+  + Sink interface {
+  + Registry
+  + func NewRegistry() *Registry
+  + func (r *Registry) SetFallback(name string)
+  + func (r *Registry) Register(cmd *Command)
+  + func (r *Registry) Get(name string) (*Command, bool)
+  + func (r *Registry) All() map[string][]*Command
+  + func (r *Registry) Names() []string
+  + func (r *Registry) Parse(input string) (*Command, ParsedArgs, error)
+   func parseArgs(parts []string, spec []Arg) (ParsedArgs, error)
+   func tokenize(input string) []string
+
+### internal/config/
+
+internal/config/config.go [go]
+  + Config
+  + ServerConfig
+  + LLMConfig
+  + func Default() *Config
+  + func Load(path string) (*Config, error)
+  + func Save(cfg *Config) error
+  + func (c *Config) Token() (string, error)
+  + func DeviceFlowLogin(ctx context.Context, server string) error
+  + func InteractiveSetup(ctx context.Context, cfg *Config) error
+   func configPath() string
+
+### internal/grade/
+
+internal/grade/grade.go [go]
+  + Report
+  + CategoryGrade
+  + Signal
+  + Input
+  + func FromData(in *Input) *Report
+  + func Repo(ctx context.Context, path string) (*Report, error)
+  + func PrintReport(r *Report)
+   func sig(name string, passed bool, detail string) Signal
+   func category(name string, signals []Signal) CategoryGrade
+   func aiReadiness(in *Input) CategoryGrade
+   func guardrails(in *Input) CategoryGrade
+   func testQuality(in *Input) CategoryGrade
+   func documentation(in *Input) CategoryGrade
+   func contributionHygiene(in *Input) CategoryGrade
+   func maintainability(in *Input) CategoryGrade
+   func boolDetail(b bool, yes, no string) string
+
+### internal/jobs/
+
+internal/jobs/tracker.go [go]
+  + Status int
+  + StatusPending Status = iota
+  + StatusRunning
+  + StatusDone
+  + StatusFailed
+  + StatusCancelled
+  + func (s Status) String() string
+  + Job
+  + Tracker
+  + func NewTracker() *Tracker
+  + func (t *Tracker) Start(parent context.Context, id, kind string) (context.Context, *Job)
+  + func (t *Tracker) Complete(id string, err error)
+  + func (t *Tracker) Cancel(id string) error
+  + func (t *Tracker) CancelAll() int
+  + func (t *Tracker) Get(id string) (Job, bool)
+  + func (t *Tracker) Running() []Job
+  + func (t *Tracker) Prune(olderThan time.Duration) int
+
+### internal/knowledge/
+
+internal/knowledge/store.go [go]
+  + Entry
+  + Store
+  + func Open(repoRoot string) (*Store, error)
+  + func (s *Store) Save() error
+  + func (s *Store) Add(e Entry)
+  + func (s *Store) Resolve(id string) bool
+  + func (s *Store) Remove(id string) bool
+  + func (s *Store) Lookup(topic, kind string) []Entry
+  + func (s *Store) OpenSuggestions() []Entry
+  + func (s *Store) ForLLM() string
+  + func (s *Store) Stats() (total, open, resolved int)
+
+### internal/llm/
+
+internal/llm/llm.go [go]
+  + Client interface {
+  + LocalClient
+  + func (c *LocalClient) Name() string
+  + func (c *LocalClient) Generate(ctx context.Context, prompt string) (string, error)
+  + func (c *LocalClient) Stream(ctx context.Context, prompt string, onChunk func(string)) (string, error)
+  + func FromConfig(cfg *config.Config) Client
+   func (c *LocalClient) parseFullResponse(resp *http.Response) (string, error)
+   func (c *LocalClient) parseStreamResponse(ctx context.Context, resp *http.Response, onChunk func(string)) (string, er...
+   func detect() Client
+
+### internal/mdrender/
+
+internal/mdrender/mdrender.go [go]
+  + func TermWidth(fallback int) int
+  + func NewRenderer(wordWrap int) (*glamour.TermRenderer, error)
+  + func IndentEachLine(prefix, s string) string
+   func terminalStyleConfig() ansi.StyleConfig
+   func terminalStyleAuto() ansi.StyleConfig
+   func envLightBackground() bool
+   func enhanceInlineCodeStyle(c *ansi.StyleConfig)
+   func boolPtr(b bool) *bool
+
+### internal/repo/
+
+internal/repo/repo.go [go]
+  + FileEntry
+  + GrepMatch
+  + func WalkFiles(root string) ([]FileEntry, error)
+  + func FileExists(root, name string) bool
+  + func DirExists(root, name string) bool
+  + func HasAny(root string, names []string) bool
+  + func ReadFile(root, name string) (string, error)
+  + func FileSize(root, name string) int64
+  + func Grep(root, pattern string, files []FileEntry) []GrepMatch
+  + func GrepCount(root, pattern string, files []FileEntry) int
+  + func GrepFilesForPatterns(root string, files []string, patterns []string) bool
+  + func ReadmeContains(root string, keywords []string) bool
+  + func Languages(files []FileEntry) map[string]int
+  + func TestFiles(files []FileEntry) []string
+  + func SourceFiles(files []FileEntry) []string
+  + func FilesOverLines(files []FileEntry, threshold int) []FileEntry
+  + func CIConfigContains(root string, patterns []string) bool
+  + func DocCommentRatio(root string, files []FileEntry) float64
+   skipDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true,
+	"target": true, "__pycache__": true...
+   func countLines(path string) int
+
+### internal/tui/
+
+internal/tui/chat.go [go]
+  + MsgKind int
+  + MsgUser MsgKind = iota
+  + MsgOutput
+  + MsgMarkdown
+  + MsgStyled
+  + MsgError
+  + MsgSystem
+  + ChatMsg
+  + Chat
+  + func NewChat(reg *commands.Registry) Chat
+  + func (c *Chat) SetProgram(p *tea.Program)
+  + func (c *Chat) Init() tea.Cmd
+  + func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd)
+  + func (c *Chat) View() string
+   cmdOutputMsg
+   cmdStatusMsg
+   cmdDoneMsg
+   cmdMarkdownLineMsg
+   purple = lipgloss.Color("#7C3AED")
+   red    = lipgloss.Color("#EF4444")
+   yellow = lipgloss.Color("#F59E0B")
+   dim    = lipgloss.Color("#6B7280")
+   white  = lipgloss.Color("#F9FAFB")
+   promptStyle = lipgloss.NewStyle().Foreground(purple).Bold(true)
+   userStyle   = lipgloss.NewStyle().Foreground(white).Bold(true)
+   outputStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB"))
+   errorStyle  = lipgloss.NewStyle().Foreground(red)
+   systemStyle = lipgloss.NewStyle().Foreground(dim).Italic(true)
+   statusLine  = lipgloss.NewStyle().Foreground(yellow)
+   barStyle    = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#9CA3AF")).
+			Background(lipgloss.Color("#1F2937"))...
+   markdownTermRenderer interface {
+   func (c *Chat) handleSubmit() tea.Cmd
+   func (c *Chat) syncViewport()
+   func (c *Chat) append(kind MsgKind, text string)
+   func (c *Chat) appendUser(text string)
+   func (c *Chat) appendError(text string)
+   func (c *Chat) appendSystem(text string)
+   func (c *Chat) appendStyled(text string)
+   func (c *Chat) appendMarkdown(text string)
+   func (c *Chat) renderMarkdownJoined(lines []string) string
+   func isLeakedTerminalInput(msg tea.KeyMsg) bool
+   func (c *Chat) execCommand(ctx context.Context, cmd *commands.Command, args commands.ParsedArgs) tea.Cmd
+   func (c *Chat) completeOrCycle()
+
+internal/tui/sink.go [go]
+  + StreamSink
+  + func NewStreamSink(p *tea.Program) *StreamSink
+  + func (s *StreamSink) Print(text string)
+  + func (s *StreamSink) PrintStyled(line string)
+  + func (s *StreamSink) PrintMarkdown(text string)
+  + func (s *StreamSink) Status(text string)
+  + func (s *StreamSink) Error(text string)
+  + func (s *StreamSink) Finish(summary string)
+  + CLISink
+  + func NewCLISink(out io.Writer) *CLISink
+  + func StdoutSink() *CLISink
+  + func (s *CLISink) Print(text string)
+  + func (s *CLISink) PrintStyled(line string)
+  + func (s *CLISink) PrintMarkdown(text string)
+  + func (s *CLISink) Status(text string)
+  + func (s *CLISink) Error(text string)
+  + func (s *CLISink) Finish(summary string)
+
+### internal/worker/
+
+internal/worker/worker.go [go]
+  + func Run(ctx context.Context, cfg *config.Config, repoPath string, client llm.Client, interval int) error
+   pollResponse
+   job
+   jobResult
+   func poll(ctx context.Context, client *http.Client, server, token string) (*job, error)
+   func submitResult(ctx context.Context, client *http.Client, server, token, jobID, status string, data any) error
+   func execute(ctx context.Context, j *job, repoPath string, client llm.Client) (any, error)
+   func executeAnalyze(ctx context.Context, repoPath string, client llm.Client) (any, error)
+   func clientName(c llm.Client) string
+
+## Task
+add chat support for planner
+
+## Response format
+Respond with a JSON object:
+```json
+{
+  "summary": "one-line description of the approach",
+  "steps": [
+    {"action": "modify", "target": "SymbolName", "file": "path/to/file.go", "task": "what to change"},
+    {"action": "create", "file": "path/to/new.go", "task": "what this file should contain"},
+    {"action": "add", "target": "NewFuncName", "file": "path/to/file.go", "after": "ExistingFunc", "task": "what the new function does"},
+    {"action": "run", "command": "go test ./...", "task": "verify changes"}
+  ]
+}
+```
+Use only symbols and files that exist in the repository structure above, unless the action is 'create' or 'add'. Be specific about what each step should accomplish.

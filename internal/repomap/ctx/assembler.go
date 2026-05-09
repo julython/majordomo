@@ -1,4 +1,4 @@
-package context
+package ctx
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/julython/repomap/graph"
+	"github.com/julython/majordomo/internal/repomap/graph"
 )
 
 // Budget controls how much context to assemble.

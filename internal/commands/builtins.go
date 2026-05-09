@@ -3,6 +3,9 @@ package commands
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/julython/majordomo/internal/analyze"
@@ -10,6 +13,10 @@ import (
 	"github.com/julython/majordomo/internal/jobs"
 	"github.com/julython/majordomo/internal/knowledge"
 	"github.com/julython/majordomo/internal/llm"
+	"github.com/julython/majordomo/internal/repomap/ctx"
+	"github.com/julython/majordomo/internal/repomap/graph"
+	"github.com/julython/majordomo/internal/repomap/indexer"
+	"github.com/julython/majordomo/internal/repomap/planner"
 )
 
 // Deps holds shared dependencies that commands can use.
@@ -25,6 +32,7 @@ func RegisterAll(r *Registry, deps *Deps) {
 	r.Register(helpCommand(r))
 	r.Register(setupCommand(deps))
 	r.Register(analyzeCommand(deps))
+	r.Register(repomapCommands(deps))
 	r.Register(chatWithToolsCommand(deps, r))
 	r.Register(statusCommand(deps))
 	r.Register(knowledgeCommand(deps))
@@ -646,4 +654,469 @@ func clearCommand() *Command {
 		Hidden:      true,
 		Run:         func(ctx context.Context, args ParsedArgs, sink Sink) error { return nil },
 	}
+}
+
+func repomapCommands(deps *Deps) *Command {
+	return &Command{
+		Name:        "repomap",
+		Aliases:     []string{"rm", "symbols", "index", "graph"},
+		Description: "Index the codebase and explore the symbol graph",
+		Usage:       "/repomap <subcommand> [args]",
+		Category:    "analysis",
+		Args: []Arg{
+			{Name: "subcommand", Description: "index|symbols|context|prompt|plan|exec|refs|files", Required: true},
+			{Name: "path", Description: "Repo path", Default: "."},
+			{Name: "symbol", Description: "Symbol name (for context/prompt/refs)"},
+			{Name: "query", Description: "Search query (for symbols)"},
+			{Name: "task", Description: "Task description (for prompt/plan)"},
+			{Name: "plan_file", Description: "Plan JSON file (for exec)"},
+			{Name: "budget", Description: "Token budget (default 4096)"},
+		},
+		Run: func(ctx context.Context, args ParsedArgs, sink Sink) error {
+			path := deps.RepoDir
+			if len(args.Positional) > 1 {
+				p := args.Positional[1]
+				if _, err := os.Stat(p); err == nil {
+					path = p
+				}
+			}
+
+			subCmd := ""
+			if len(args.Positional) > 0 {
+				subCmd = args.Positional[0]
+			}
+
+			switch subCmd {
+			case "index", "i":
+				cmdIndex(path, sink)
+			case "symbols", "s":
+				cmdSymbols(path, args, sink)
+			case "context", "c":
+				cmdContext(path, args, sink)
+			case "prompt", "p":
+				cmdPrompt(path, args, sink)
+			case "plan", "pl":
+				cmdPlan(path, args, sink)
+			case "exec", "e":
+				cmdExec(path, args, sink)
+			case "refs", "r":
+				cmdRefs(path, args, sink)
+			case "files", "f":
+				cmdFiles(path, sink)
+			default:
+				sink.Error(fmt.Sprintf("unknown subcommand: %s", subCmd))
+				sink.Print("Usage: /repomap index|symbols|context|prompt|plan|exec|refs|files [path] [args]")
+			}
+			return nil
+		},
+	}
+}
+
+// --- repomap subcommand implementations ---
+
+func repoRoot(start string) string {
+	abs, _ := filepath.Abs(start)
+	for {
+		if _, err := os.Stat(filepath.Join(abs, ".git")); err == nil {
+			return abs
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			a, _ := filepath.Abs(start)
+			return a
+		}
+		abs = parent
+	}
+}
+
+func resolveTarget(idx *indexer.Indexer, query string) *graph.Symbol {
+	targets := idx.Graph.LookupName(query)
+	if len(targets) == 0 {
+		targets = idx.Graph.FuzzyLookup(query)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	return targets[0]
+}
+
+func cmdIndex(path string, sink Sink) {
+	root := repoRoot(path)
+	sink.Status("Indexing repository...")
+
+	idx := indexer.New(root)
+	if err := idx.Index(); err != nil {
+		sink.Error(fmt.Sprintf("index: %v", err))
+		return
+	}
+	idx.ResolveImportEdges()
+	refStats := idx.ResolveReferences()
+
+	stats := idx.Graph.Stats()
+	sink.PrintStyled(fmt.Sprintf("Indexed %s in %s", root, idx.IndexDuration))
+	sink.Print(fmt.Sprintf("  Files:   %d scanned, %d skipped, %d parse errors",
+		idx.FilesScanned, idx.FilesSkipped, idx.ParseErrors))
+	sink.Print(fmt.Sprintf("  Symbols: %d total", stats.Symbols))
+	sink.Print(fmt.Sprintf("  Edges:   %d total", stats.Edges))
+	sink.Print("")
+
+	sink.PrintStyled("  Languages:")
+	for lang, count := range stats.ByLanguage {
+		sink.Print(fmt.Sprintf("    %-12s %d files", lang, count))
+	}
+
+	sink.PrintStyled("  Symbol kinds:")
+	for kind, count := range stats.ByKind {
+		sink.Print(fmt.Sprintf("    %-12s %d", kind, count))
+	}
+
+	sink.PrintStyled("  References:")
+	hitRate := float64(0)
+	if refStats.RefsFound > 0 {
+		hitRate = float64(refStats.RefsResolved) / float64(refStats.RefsFound) * 100
+	}
+	sink.Print(fmt.Sprintf("    found=%d resolved=%d unresolved=%d (%.0f%% hit rate)",
+		refStats.RefsFound, refStats.RefsResolved, refStats.RefsUnresolved, hitRate))
+
+	sink.Finish("")
+	idx.Close()
+}
+
+func cmdSymbols(path string, args ParsedArgs, sink Sink) {
+	root := repoRoot(path)
+	query := ""
+	if len(args.Positional) > 1 {
+		candidate := args.Positional[1]
+		if info, err := os.Stat(candidate); err != nil || !info.IsDir() {
+			query = candidate
+		}
+	}
+	if len(args.Positional) > 2 {
+		query = args.Positional[2]
+	}
+
+	sink.Status("Searching symbols...")
+
+	idx := indexer.New(root)
+
+	var results []*graph.Symbol
+	if query == "" {
+		for _, sym := range idx.Graph.Symbols {
+			results = append(results, sym)
+		}
+	} else {
+		results = idx.Graph.LookupName(query)
+		if len(results) == 0 {
+			results = idx.Graph.FuzzyLookup(query)
+		}
+	}
+
+	sink.Print(fmt.Sprintf("%-10s %-40s %s:%d-%d", "KIND", "NAME", "FILE", "LINE", "END"))
+
+	for _, sym := range results {
+		exported := " "
+		if sym.Exported {
+			exported = "+"
+		}
+		sink.Print(fmt.Sprintf("%s %-10s %-40s %s:%d-%d",
+			exported, sym.Kind, sym.Name, sym.File, sym.StartLine, sym.EndLine))
+	}
+
+	sink.Finish(fmt.Sprintf("Found %d symbol(s)", len(results)))
+	idx.Close()
+}
+
+func cmdContext(path string, args ParsedArgs, sink Sink) {
+	symbolQuery := ""
+	if len(args.Positional) > 1 {
+		symbolQuery = args.Positional[1]
+	}
+	if len(args.Positional) > 2 {
+		symbolQuery = args.Positional[2]
+	}
+
+	target := resolveSymbol(path, symbolQuery, sink)
+	if target == nil {
+		return
+	}
+
+	root := repoRoot(path)
+	idx := indexer.New(root)
+	sink.Status("Assembling context...")
+
+	asm := ctx.NewAssembler(idx.Graph, root)
+	asm.Budget = getBudget(args)
+
+	assembled, err := asm.ForSymbol(target)
+	if err != nil {
+		sink.Error(fmt.Sprintf("context: %v", err))
+		idx.Close()
+		return
+	}
+
+	sink.PrintMarkdown(ctx.RenderHuman(assembled))
+	sink.Finish("")
+	idx.Close()
+}
+
+func cmdPrompt(path string, args ParsedArgs, sink Sink) {
+	symbolQuery := ""
+	task := ""
+	if len(args.Positional) > 1 {
+		candidate := args.Positional[1]
+		if info, err := os.Stat(candidate); err != nil || !info.IsDir() {
+			symbolQuery = candidate
+		} else {
+			path = candidate
+		}
+	}
+	if len(args.Positional) > 2 {
+		if symbolQuery == "" {
+			symbolQuery = args.Positional[2]
+		} else {
+			task = strings.Join(args.Positional[2:], " ")
+		}
+	}
+	if len(args.Positional) > 3 {
+		task = strings.Join(args.Positional[2:], " ")
+	}
+
+	target := resolveSymbol(path, symbolQuery, sink)
+	if target == nil {
+		return
+	}
+
+	root := repoRoot(path)
+	idx := indexer.New(root)
+	sink.Status("Generating prompt...")
+
+	asm := ctx.NewAssembler(idx.Graph, root)
+	asm.Budget = getBudget(args)
+
+	assembled, err := asm.ForSymbol(target)
+	if err != nil {
+		sink.Error(fmt.Sprintf("prompt: %v", err))
+		return
+	}
+
+	opts := ctx.PromptOptions{
+		Operation: ctx.OpReplace,
+		Task:      task,
+	}
+
+	sink.PrintMarkdown(ctx.RenderPrompt(assembled, opts))
+	sink.Finish("")
+	idx.Close()
+}
+
+func cmdPlan(path string, args ParsedArgs, sink Sink) {
+	task := ""
+	if len(args.Positional) > 1 {
+		candidate := args.Positional[1]
+		if info, err := os.Stat(candidate); err != nil || !info.IsDir() {
+			task = candidate
+		} else {
+			path = candidate
+		}
+	}
+	if len(args.Positional) > 2 {
+		task = strings.Join(args.Positional[2:], " ")
+	}
+	if len(args.Positional) > 3 {
+		task = strings.Join(args.Positional[2:], " ")
+	}
+
+	sink.Status("Building planning prompt...")
+
+	idx := indexer.New(repoRoot(path))
+	p := planner.NewPlanner(idx.Graph, repoRoot(path))
+	p.Budget = getBudget(args)
+
+	sink.PrintMarkdown(p.BuildPlanningPrompt(task))
+	sink.Finish("")
+	idx.Close()
+}
+
+func cmdExec(path string, args ParsedArgs, sink Sink) {
+	planArg := ""
+	if len(args.Positional) > 1 {
+		planArg = args.Positional[1]
+	}
+
+	if planArg == "" {
+		sink.Error("specify a plan JSON file")
+		return
+	}
+
+	planData, err := os.ReadFile(planArg)
+	if err != nil {
+		sink.Error(fmt.Sprintf("read plan: %v", err))
+		return
+	}
+
+	plan, err := planner.ParsePlan(string(planData))
+	if err != nil {
+		sink.Error(fmt.Sprintf("parse plan: %v", err))
+		return
+	}
+
+	sink.PrintStyled(fmt.Sprintf("%s", plan))
+
+	idx := indexer.New(repoRoot(path))
+	p := planner.NewPlanner(idx.Graph, repoRoot(path))
+	p.Budget = getBudget(args)
+
+	for i, step := range plan.Steps {
+		if step.Action == planner.ActionRun {
+			sink.Print(fmt.Sprintf("## Step %d: Run\n$ %s\n", i+1, step.Command))
+			continue
+		}
+
+		if step.Action == planner.ActionDelete {
+			prompt, err := p.BuildStepPrompt(step)
+			if err != nil {
+				sink.Error(fmt.Sprintf("  error: %v", err))
+				continue
+			}
+			sink.PrintStyled(fmt.Sprintf("## Step %d: Delete\n%s", i+1, prompt))
+			continue
+		}
+
+		prompt, err := p.BuildStepPrompt(step)
+		if err != nil {
+			sink.Error(fmt.Sprintf("  error: %v (skipping)", err))
+			continue
+		}
+
+		sink.PrintStyled(fmt.Sprintf("## Step %d: %s %s", i+1, step.Action, step.Target))
+		sink.PrintMarkdown(prompt)
+		sink.PrintStyled("---")
+		sink.Print("")
+	}
+
+	sink.Finish("")
+	idx.Close()
+}
+
+func cmdRefs(path string, args ParsedArgs, sink Sink) {
+	symbolQuery := ""
+	if len(args.Positional) > 1 {
+		symbolQuery = args.Positional[1]
+	}
+	if len(args.Positional) > 2 {
+		symbolQuery = args.Positional[2]
+	}
+
+	target := resolveSymbol(path, symbolQuery, sink)
+	if target == nil {
+		return
+	}
+
+	root := repoRoot(path)
+	idx := indexer.New(root)
+	sink.Status("Resolving references...")
+
+	sink.Print(fmt.Sprintf("=== %s (%s:%d) ===\n", target.ID, target.File, target.StartLine))
+
+	dependents := idx.Graph.Dependents(target.ID)
+	if len(dependents) > 0 {
+		sink.PrintStyled(fmt.Sprintf("  Called by (%d):", len(dependents)))
+		seen := make(map[graph.SymbolID]bool)
+		for _, depID := range dependents {
+			if seen[depID] {
+				continue
+			}
+			seen[depID] = true
+			if dep, ok := idx.Graph.Symbols[depID]; ok {
+				sink.Print(fmt.Sprintf("    ← %s  %s:%d", dep.SignatureOrFallback(), dep.File, dep.StartLine))
+			} else {
+				sink.Print(fmt.Sprintf("    ← (file-level) %s", depID))
+			}
+		}
+	} else {
+		sink.Print("  Called by: (none found)")
+	}
+	sink.Print("")
+
+	deps := idx.Graph.Dependencies(target.ID)
+	if len(deps) > 0 {
+		sink.PrintStyled(fmt.Sprintf("  Calls (%d):", len(deps)))
+		seen := make(map[graph.SymbolID]bool)
+		for _, depID := range deps {
+			if seen[depID] {
+				continue
+			}
+			seen[depID] = true
+			if dep, ok := idx.Graph.Symbols[depID]; ok {
+				sink.Print(fmt.Sprintf("    → %s  %s:%d", dep.SignatureOrFallback(), dep.File, dep.StartLine))
+			}
+		}
+	} else {
+		sink.Print("  Calls: (none found)")
+	}
+
+	sink.Finish("")
+	idx.Close()
+}
+
+func cmdFiles(path string, sink Sink) {
+	root := repoRoot(path)
+	sink.Status("Listing files...")
+
+	idx := indexer.New(root)
+
+	type fileStat struct {
+		path    string
+		lang    graph.Language
+		symbols int
+		imports int
+	}
+
+	var files []fileStat
+	for path2, f := range idx.Graph.Files {
+		files = append(files, fileStat{
+			path:    path2,
+			lang:    f.Language,
+			symbols: len(f.Symbols),
+			imports: len(f.Imports),
+		})
+	}
+
+	sink.Print(fmt.Sprintf("%-12s %6s %7s  %s", "LANGUAGE", "SYMS", "IMPORTS", "FILE"))
+	sink.Print(strings.Repeat("-", 72))
+	for _, f := range files {
+		sink.Print(fmt.Sprintf("%-12s %6d %7d  %s", f.lang, f.symbols, f.imports, f.path))
+	}
+
+	sink.Finish("")
+	idx.Close()
+}
+
+func resolveSymbol(path, query string, sink Sink) *graph.Symbol {
+	if query == "" {
+		sink.Error("specify a symbol name")
+		return nil
+	}
+	root := repoRoot(path)
+	idx := indexer.New(root)
+	targets := idx.Graph.LookupName(query)
+	if len(targets) == 0 {
+		targets = idx.Graph.FuzzyLookup(query)
+	}
+	if len(targets) == 0 {
+		sink.Error(fmt.Sprintf("no symbol matching %q", query))
+		idx.Close()
+		return nil
+	}
+	return targets[0]
+}
+
+func getBudget(args ParsedArgs) ctx.Budget {
+	budget := ctx.DefaultBudget
+	if b, ok := args.Flags["budget"]; ok && b != "" {
+		if n, err := strconv.Atoi(b); err == nil && n > 0 {
+			budget.MaxTokens = n
+		}
+	}
+	return budget
 }

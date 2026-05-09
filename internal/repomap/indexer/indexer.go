@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/julython/repomap/graph"
+	"github.com/julython/majordomo/internal/repomap/graph"
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
 )
 

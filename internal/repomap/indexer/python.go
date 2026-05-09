@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/julython/repomap/graph"
+	"github.com/julython/majordomo/internal/repomap/graph"
 	tree_sitter "github.com/tree-sitter/go-tree-sitter"
 	tree_sitter_python "github.com/tree-sitter/tree-sitter-python/bindings/go"
 )

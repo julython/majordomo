@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	appctx "github.com/julython/repomap/context"
-	"github.com/julython/repomap/graph"
+	appctx "github.com/julython/majordomo/internal/repomap/ctx"
+	"github.com/julython/majordomo/internal/repomap/graph"
 )
 
 // Planner uses the knowledge graph to produce LLM prompts for planning

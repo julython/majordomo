@@ -42,7 +42,6 @@ func Open(repoRoot string) (*Store, error) {
 
 	data, err := os.ReadFile(s.path)
 	if os.IsNotExist(err) {
-		slog.Info("no existing knowledge, starting fresh", "repo", repoRoot)
 		return s, nil
 	}
 	if err != nil {

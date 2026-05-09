@@ -108,14 +108,6 @@ func (tb *ToolBridge) ExecuteTool(ctx context.Context, toolCall llm.ToolCall, si
 		return "", err
 	}
 
-	// Also show the tool execution in the UI
-	if sink != nil {
-		sink.Status(fmt.Sprintf("🔧 Running %s...", cmd.Name))
-		for _, line := range captureSink.Lines {
-			sink.Print(line)
-		}
-	}
-
 	return captureSink.GetOutput(), nil
 }
 

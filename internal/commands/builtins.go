@@ -240,7 +240,7 @@ func chatCommand(deps *Deps) *Command {
 	return &Command{
 		Name:        "chat",
 		Aliases:     []string{"ask"},
-		Description: "Ask the LLM about this repo",
+		Description: "Ask the LLM about this repo — indexes code and plans changes",
 		Usage:       "/chat <message>",
 		Category:    "general",
 		Args: []Arg{
@@ -257,75 +257,142 @@ func chatCommand(deps *Deps) *Command {
 				message = args.Raw
 			}
 			if message == "" {
-				sink.Error("Say something! e.g. /chat how do I run the tests?")
+				sink.Error("Say something! e.g. /chat add a new endpoint to the API")
 				return nil
 			}
 
-			kb, err := knowledge.Open(deps.RepoDir)
-			if err != nil {
-				kb = &knowledge.Store{}
-			}
+			path := deps.RepoDir
 
-			prompt := buildChatPrompt(message, kb)
-
-			sink.Status(fmt.Sprintf("Thinking (%s)...", deps.LLM.Name()))
-
-			// Stream tokens — flush each line as it completes
-			var lineBuf strings.Builder
-			_, err = deps.LLM.Stream(ctx, prompt, func(token string) {
-				for _, ch := range token {
-					if ch == '\n' {
-						sink.PrintMarkdown(lineBuf.String())
-						lineBuf.Reset()
-					} else {
-						lineBuf.WriteRune(ch)
-					}
-				}
-			})
-
-			// Flush any remaining partial line
-			if lineBuf.Len() > 0 {
-				sink.PrintMarkdown(lineBuf.String())
-			}
-
-			if ctx.Err() != nil {
+			// Phase 1: Index the repo
+			sink.Status("Indexing repository...")
+			idx := indexer.New(path)
+			if err := idx.Index(); err != nil {
+				sink.Error(fmt.Sprintf("index: %v", err))
 				return nil
 			}
+			idx.ResolveImportEdges()
+			idx.ResolveReferences()
+
+			// Phase 2: Build planning prompt with repo skeleton
+			sink.Status("Analyzing task...")
+			p := planner.NewPlanner(idx.Graph, path)
+			planningPrompt := p.BuildPlanningPrompt(message)
+
+			// Wrap with system prompt
+			fullPrompt := `You are majordomo, an AI assistant that helps developers understand and improve their projects. You are running locally on the user's machine, inside their repository.
+
+` + planningPrompt
+
+			// Send to LLM to generate a plan
+			sink.Status(fmt.Sprintf("Planning (%s)...", deps.LLM.Name()))
+			planResp, err := deps.LLM.Generate(ctx, fullPrompt)
+			idx.Close()
 			if err != nil {
 				sink.Error(fmt.Sprintf("LLM: %v", err))
+				return nil
 			}
 
+			// Parse the plan
+			plan, err := planner.ParsePlan(planResp)
+			if err != nil {
+				sink.Error(fmt.Sprintf("Failed to parse plan: %v", err))
+				sink.Print("LLM response (not a valid plan):")
+				sink.PrintMarkdown(planResp)
+				return nil
+			}
+
+			sink.PrintStyled(fmt.Sprintf("Plan: %s (%d steps)", plan.Summary, len(plan.Steps)))
+			sink.Print("")
+
+			// Phase 3: Execute each plan step
+			idx = indexer.New(path)
+			for i, step := range plan.Steps {
+				if ctx.Err() != nil {
+					sink.PrintStyled("⊘ Cancelled")
+					idx.Close()
+					return nil
+				}
+
+				switch step.Action {
+				case planner.ActionRun:
+					sink.PrintStyled(fmt.Sprintf("--- Step %d/%d: Run `%s` ---", i+1, len(plan.Steps), step.Command))
+					sink.Print(fmt.Sprintf("Command: %s", step.Command))
+					// Just log — we don't execute shell commands from chat
+					sink.Print("  (executed in your terminal)")
+
+				case planner.ActionDelete:
+					stepPrompt, err := p.BuildStepPrompt(step)
+					if err != nil {
+						sink.Error(fmt.Sprintf("Step %d (%s %s): %v", i+1, step.Action, step.Target, err))
+						continue
+					}
+					sink.PrintStyled(fmt.Sprintf("--- Step %d/%d: Delete `%s` ---", i+1, len(plan.Steps), step.Target))
+					sink.Status(fmt.Sprintf("Executing step %d/%d (%s)...", i+1, len(plan.Steps), step.Action))
+					streamChat(ctx, sink, deps.LLM, stepPrompt, func(token string) {
+						var lineBuf strings.Builder
+						for _, ch := range token {
+							if ch == '\n' {
+								sink.PrintMarkdown(lineBuf.String())
+								lineBuf.Reset()
+							} else {
+								lineBuf.WriteRune(ch)
+							}
+						}
+						if lineBuf.Len() > 0 {
+							sink.PrintMarkdown(lineBuf.String())
+						}
+					})
+
+				default:
+					stepPrompt, err := p.BuildStepPrompt(step)
+					if err != nil {
+						sink.Error(fmt.Sprintf("Step %d (%s %s): %v", i+1, step.Action, step.Target, err))
+						continue
+					}
+					sink.PrintStyled(fmt.Sprintf("--- Step %d/%d: %s `%s` in `%s` ---", i+1, len(plan.Steps), step.Action, step.Target, step.File))
+					sink.Status(fmt.Sprintf("Executing step %d/%d (%s)...", i+1, len(plan.Steps), step.Action))
+					streamChat(ctx, sink, deps.LLM, stepPrompt, func(token string) {
+						var lineBuf strings.Builder
+						for _, ch := range token {
+							if ch == '\n' {
+								sink.PrintMarkdown(lineBuf.String())
+								lineBuf.Reset()
+							} else {
+								lineBuf.WriteRune(ch)
+							}
+						}
+						if lineBuf.Len() > 0 {
+							sink.PrintMarkdown(lineBuf.String())
+						}
+					})
+				}
+				sink.Print("")
+			}
+
+			idx.Close()
+			sink.Finish(fmt.Sprintf("Completed %d steps", len(plan.Steps)))
 			return nil
 		},
 	}
 }
 
-func buildChatPrompt(message string, kb *knowledge.Store) string {
-	var b strings.Builder
-
-	b.WriteString(`You are majordomo, an AI assistant that helps developers understand and improve their projects. You are running locally on the user's machine, inside their repository.
-
-Be direct and helpful. Give concrete commands and file paths when relevant. Keep answers focused — you're a terminal tool, not a blog post.
-
-`)
-
-	if kbCtx := kb.ForLLM(); kbCtx != "" {
-		b.WriteString("### What you know about this repo:\n")
-		b.WriteString(kbCtx)
-		b.WriteString("\n")
+// planStepsDone tracks completed steps per context.
+func streamChat(ctx context.Context, sink Sink, client llm.Client, prompt string, onChunk func(token string)) {
+	var lineBuf strings.Builder
+	_, err := client.Stream(ctx, prompt, func(token string) {
+		for _, ch := range token {
+			if ch == '\n' {
+				sink.PrintMarkdown(lineBuf.String())
+				lineBuf.Reset()
+			} else {
+				lineBuf.WriteRune(ch)
+			}
+		}
+		onChunk(token)
+	})
+	if err != nil {
+		sink.Error(fmt.Sprintf("LLM: %v", err))
 	}
-
-	if kb.LastReport != nil {
-		b.WriteString("### Last scan data is available (repo has been analyzed before).\n\n")
-	} else {
-		b.WriteString("### This repo has not been analyzed yet. Suggest running /analyze if relevant.\n\n")
-	}
-
-	b.WriteString("### User's message:\n")
-	b.WriteString(message)
-	b.WriteString("\n")
-
-	return b.String()
 }
 
 func statusCommand(deps *Deps) *Command {
@@ -729,17 +796,6 @@ func repoRoot(start string) string {
 	}
 }
 
-func resolveTarget(idx *indexer.Indexer, query string) *graph.Symbol {
-	targets := idx.Graph.LookupName(query)
-	if len(targets) == 0 {
-		targets = idx.Graph.FuzzyLookup(query)
-	}
-	if len(targets) == 0 {
-		return nil
-	}
-	return targets[0]
-}
-
 func cmdIndex(path string, sink Sink) {
 	root := repoRoot(path)
 	sink.Status("Indexing repository...")
@@ -811,7 +867,7 @@ func cmdSymbols(path string, args ParsedArgs, sink Sink) {
 		}
 	}
 
-	sink.Print(fmt.Sprintf("%-10s %-40s %s:%d-%d", "KIND", "NAME", "FILE", "LINE", "END"))
+	sink.Print(fmt.Sprintf("%-10s %-40s %s", "KIND", "NAME", "FILE:LINE-END"))
 
 	for _, sym := range results {
 		exported := " "

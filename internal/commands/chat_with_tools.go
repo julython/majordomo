@@ -61,15 +61,9 @@ func chatWithToolsCommand(deps *Deps, reg *Registry) *Command {
 			sink.Status(fmt.Sprintf("Thinking (%s)...", deps.LLM.Name()))
 
 			// Tool calling loop - continue until we get a text response
-			maxIterations := 5
-			for i := range maxIterations {
+			for {
 				if ctx.Err() != nil {
 					return nil
-				}
-
-				// Clear status for new iteration
-				if i > 0 {
-					sink.Status("Processing tool results...")
 				}
 
 				// Stream the response
@@ -130,10 +124,6 @@ func chatWithToolsCommand(deps *Deps, reg *Registry) *Command {
 				// Continue the loop to let the LLM respond to tool results
 			}
 
-			// If we hit max iterations, let the user know
-			if maxIterations >= 5 {
-				sink.Print("⚠️  Reached maximum tool call iterations")
-			}
 
 			return nil
 		},

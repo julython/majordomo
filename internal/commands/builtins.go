@@ -14,6 +14,7 @@ import (
 	"github.com/julython/majordomo/internal/knowledge"
 	"github.com/julython/majordomo/internal/llm"
 	"github.com/julython/majordomo/internal/repomap/ctx"
+	"github.com/julython/majordomo/internal/repomap/executor"
 	"github.com/julython/majordomo/internal/repomap/graph"
 	"github.com/julython/majordomo/internal/repomap/indexer"
 	"github.com/julython/majordomo/internal/repomap/planner"
@@ -99,7 +100,7 @@ func chatCommand(deps *Deps, reg *Registry) *Command {
 			messages := []llm.Message{{Role: "system", Content: fullPrompt}}
 			messages = append(messages, llm.Message{Role: "user", Content: message})
 
-			bridge := NewToolBridge(reg)
+			bridge := NewToolBridge(reg, executor.New(path))
 			tools := bridge.GetTools()
 
 			localClient, ok := deps.LLM.(*llm.LocalClient)

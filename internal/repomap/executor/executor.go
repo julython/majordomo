@@ -1,6 +1,9 @@
 // Package executor provides primitives for modifying repo files and running commands.
 // All symbol-based operations use exact byte ranges from the tree-sitter graph,
 // so edits are surgical — no fragile text search-and-replace.
+//
+// Before each tool call that modifies files, the executor re-indexes the repo
+// to ensure byte ranges are current. This is safe because tree-sitter is fast.
 package executor
 
 import (
@@ -11,9 +14,11 @@ import (
 	"strings"
 
 	"github.com/julython/majordomo/internal/repomap/graph"
+	"github.com/julython/majordomo/internal/repomap/indexer"
 )
 
-// Executor holds the repo root for constructing absolute file paths.
+// Executor holds the repo root and performs indexed file modifications.
+// It owns its graph lifecycle — re-indexing before each operation.
 type Executor struct {
 	Root string
 }
@@ -29,90 +34,190 @@ func (e *Executor) ReadFile(relPath string) ([]byte, error) {
 }
 
 // WriteFile writes complete file content. Path is repo-relative.
-// Used for create steps — non-destructive, safe to execute.
 func (e *Executor) WriteFile(relPath string, content []byte) error {
 	return os.WriteFile(filepath.Join(e.Root, relPath), content, 0o644)
 }
 
-// ReplaceSymbol replaces the content between sym.StartByte and sym.EndByte
-// with newBody. Path is repo-relative. Used for modify steps.
-func (e *Executor) ReplaceSymbol(relPath string, sym *graph.Symbol, newBody string) error {
-	content, err := e.ReadFile(relPath)
+// ReplaceSymbol re-indexes the repo, looks up the symbol by name,
+// and replaces its content. Returns the old symbol body for reference.
+func (e *Executor) ReplaceSymbol(file, symbolName, newBody string) (string, error) {
+	idx, g, err := e.Index()
+	if err != nil {
+		return "", err
+	}
+	defer idx.Close()
+
+	sym, err := e.ResolveSymbol(g, file, symbolName)
+	if err != nil {
+		return "", err
+	}
+
+	content, err := e.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+	if int(sym.EndByte) > len(content) {
+		return "", fmt.Errorf("symbol %s: EndByte %d exceeds file size %d", symbolName, sym.EndByte, len(content))
+	}
+
+	oldBody := string(content[sym.StartByte:sym.EndByte])
+	replaced := append(content[:sym.StartByte], []byte(newBody)...)
+	replaced = append(replaced, content[sym.EndByte:]...)
+	if err := os.WriteFile(filepath.Join(e.Root, file), replaced, 0o644); err != nil {
+		return "", fmt.Errorf("write file: %w", err)
+	}
+
+	return oldBody, nil
+}
+
+// InsertAfter re-indexes the repo, looks up the symbol by name,
+// and inserts new code after it.
+func (e *Executor) InsertAfter(file, afterSymbol, newCode string) error {
+	idx, g, err := e.Index()
+	if err != nil {
+		return err
+	}
+	defer idx.Close()
+
+	sym, err := e.ResolveSymbol(g, file, afterSymbol)
+	if err != nil {
+		return err
+	}
+
+	content, err := e.ReadFile(file)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
 	}
 	if int(sym.EndByte) > len(content) {
-		return fmt.Errorf("symbol %s: EndByte %d exceeds file size %d", sym.Name, sym.EndByte, len(content))
+		return fmt.Errorf("symbol %s: EndByte %d exceeds file size %d", afterSymbol, sym.EndByte, len(content))
 	}
 
-	replaced := append(content[:sym.StartByte], []byte(newBody)...)
-	replaced = append(replaced, content[sym.EndByte:]...)
-	return os.WriteFile(filepath.Join(e.Root, relPath), replaced, 0o644)
-}
-
-// InsertAfter inserts newCode at byte offset afterSym.EndByte.
-// Path is repo-relative. Used for add steps.
-func (e *Executor) InsertAfter(relPath string, afterSym *graph.Symbol, newCode string) error {
-	content, err := e.ReadFile(relPath)
-	if err != nil {
-		return fmt.Errorf("read file: %w", err)
-	}
-	if int(afterSym.EndByte) > len(content) {
-		return fmt.Errorf("symbol %s: EndByte %d exceeds file size %d", afterSym.Name, afterSym.EndByte, len(content))
-	}
-
-	// Insert a newline before and after if content isn't at file boundaries
-	insertPos := int(afterSym.EndByte)
+	insertPos := int(sym.EndByte)
 	if insertPos > 0 && insertPos < len(content) {
 		if content[insertPos-1] != '\n' {
-			insertPos = insertPos - 1
+			insertPos--
 		}
 	}
 	if insertPos < len(content) && content[insertPos] != '\n' && content[insertPos-1] != '\n' {
-		insertPos = insertPos + 1
+		insertPos++
 	}
 
 	inserted := append(content[:insertPos], append([]byte("\n"+newCode+"\n"), content[insertPos:]...)...)
-	return os.WriteFile(filepath.Join(e.Root, relPath), inserted, 0o644)
+	return os.WriteFile(filepath.Join(e.Root, file), inserted, 0o644)
 }
 
-// DeleteSymbol removes the content between sym.StartByte and sym.EndByte,
-// preserving surrounding newlines. Path is repo-relative. Used for delete steps.
-func (e *Executor) DeleteSymbol(relPath string, sym *graph.Symbol) error {
-	content, err := e.ReadFile(relPath)
+// DeleteSymbol re-indexes the repo, looks up the symbol by name,
+// and removes it from the file.
+func (e *Executor) DeleteSymbol(file, symbolName string) error {
+	idx, g, err := e.Index()
+	if err != nil {
+		return err
+	}
+	defer idx.Close()
+
+	sym, err := e.ResolveSymbol(g, file, symbolName)
+	if err != nil {
+		return err
+	}
+
+	content, err := e.ReadFile(file)
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
 	}
 	if int(sym.EndByte) > len(content) {
-		return fmt.Errorf("symbol %s: EndByte %d exceeds file size %d", sym.Name, sym.EndByte, len(content))
+		return fmt.Errorf("symbol %s: EndByte %d exceeds file size %d", symbolName, sym.EndByte, len(content))
 	}
 
 	start := int(sym.StartByte)
 	end := int(sym.EndByte)
 
-	// Trim leading newline from the range
 	if start > 0 && content[start-1] == '\n' {
 		start--
 	}
-	// Trim trailing newline from the range
 	if end < len(content) && content[end] == '\n' {
 		end++
 	}
 
 	deleted := append(content[:start], content[end:]...)
-	return os.WriteFile(filepath.Join(e.Root, relPath), deleted, 0o644)
+	return os.WriteFile(filepath.Join(e.Root, file), deleted, 0o644)
+}
+
+// SymbolContent returns the source of a symbol by name, re-indexing first.
+func (e *Executor) SymbolContent(file, symbolName string) (string, error) {
+	idx, g, err := e.Index()
+	if err != nil {
+		return "", err
+	}
+	defer idx.Close()
+
+	sym, err := e.ResolveSymbol(g, file, symbolName)
+	if err != nil {
+		return "", err
+	}
+
+	content, err := e.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("read file: %w", err)
+	}
+	if int(sym.EndByte) > len(content) {
+		return "", fmt.Errorf("symbol %s: EndByte %d exceeds file size %d", symbolName, sym.EndByte, len(content))
+	}
+
+	return string(content[sym.StartByte:sym.EndByte]), nil
 }
 
 // RunCommand executes a shell command in the given directory.
-// name and args are the command and its arguments.
-// Returns combined stdout+stderr.
 func (e *Executor) RunCommand(dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	return cmd.CombinedOutput()
 }
 
-// TrimLeadingWhitespace removes leading whitespace (spaces/tabs/newlines) from a string.
-func TrimLeadingWhitespace(s string) string {
+// TrimNewlines removes trailing newlines from a string.
+func TrimNewlines(s string) string {
 	return strings.TrimRight(s, "\n")
+}
+
+// index returns a fresh indexed graph. The caller must close the indexer.
+// Each tool call re-indexes to guarantee correct byte ranges after prior edits.
+func (e *Executor) Index() (*indexer.Indexer, *graph.Graph, error) {
+	idx := indexer.New(e.Root)
+	if err := idx.Index(); err != nil {
+		idx.Close()
+		return nil, nil, fmt.Errorf("index: %w", err)
+	}
+	idx.ResolveImportEdges()
+	idx.ResolveReferences()
+	return idx, idx.Graph, nil
+}
+
+// resolveSymbol looks up a symbol by name in the given graph,
+// optionally scoped to a specific file.
+func (e *Executor) ResolveSymbol(g *graph.Graph, file, name string) (*graph.Symbol, error) {
+	if file != "" {
+		for _, sym := range g.SymbolsInFile(file) {
+			if sym.Name == name {
+				return sym, nil
+			}
+		}
+	}
+
+	matches := g.LookupName(name)
+	if len(matches) > 0 {
+		if file != "" {
+			for _, m := range matches {
+				if m.File == file {
+					return m, nil
+				}
+			}
+		}
+		return matches[0], nil
+	}
+
+	fuzzy := g.FuzzyLookup(name)
+	if len(fuzzy) > 0 {
+		return fuzzy[0], nil
+	}
+
+	return nil, fmt.Errorf("symbol %q not found", name)
 }

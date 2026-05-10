@@ -113,7 +113,7 @@ type markdownTermRenderer interface {
 
 func NewChat(reg *commands.Registry) Chat {
 	ti := textinput.New()
-	ti.Placeholder = "Type /help or a command..."
+	ti.Placeholder = "Chat with the LLM or type /help for commands..."
 	ti.Prompt = "❯ "
 	ti.PromptStyle = promptStyle
 	ti.Focus()
@@ -166,7 +166,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !c.ready {
 			c.viewport = viewport.New(c.width, vpH)
 			c.viewport.MouseWheelEnabled = true
-			c.appendSystem("🏠 majordomo — type /help to get started")
+			c.appendSystem("🏠 majordomo — type a message to chat, or /help for commands")
 			c.dirty = true
 			c.ready = true
 		} else {

@@ -33,7 +33,7 @@ func RegisterAll(r *Registry, deps *Deps) {
 	r.Register(setupCommand(deps))
 	r.Register(analyzeCommand(deps))
 	r.Register(repomapCommands(deps))
-	r.Register(chatWithToolsCommand(deps, r))
+	r.Register(chatCommand(deps, r))
 	r.Register(statusCommand(deps))
 	r.Register(knowledgeCommand(deps))
 	r.Register(resolveCommand(deps))
@@ -48,6 +48,143 @@ func RegisterAll(r *Registry, deps *Deps) {
 
 	// Unknown input goes to the LLM chat
 	r.SetFallback("chat")
+}
+
+func chatCommand(deps *Deps, reg *Registry) *Command {
+	return &Command{
+		Name:        "chat",
+		Aliases:     []string{"ask"},
+		Description: "Ask the LLM about this repo — indexes code and creates a plan",
+		Usage:       "/chat <message>",
+		Category:    "general",
+		Args: []Arg{
+			{Name: "message", Description: "Your question or request"},
+		},
+		Run: func(ctx context.Context, args ParsedArgs, sink Sink) error {
+			if deps.LLM == nil {
+				sink.Error("No LLM available. Start ollama or another local model, then restart majordomo.")
+				return nil
+			}
+
+			message := strings.Join(args.Positional, " ")
+			if message == "" {
+				message = args.Raw
+			}
+			if message == "" {
+				sink.Error("Say something! e.g. /chat add a new endpoint to the API")
+				return nil
+			}
+
+			path := deps.RepoDir
+
+			// Phase 1: Index the repo
+			sink.Status("Indexing repository...")
+			idx := indexer.New(path)
+			if err := idx.Index(); err != nil {
+				sink.Error(fmt.Sprintf("index: %v", err))
+				return nil
+			}
+			idx.ResolveImportEdges()
+			idx.ResolveReferences()
+
+			// Phase 2: Build planning prompt with repo skeleton
+			sink.Status("Analyzing task...")
+			p := planner.NewPlanner(idx.Graph, path)
+			planningPrompt := p.BuildPlanningPrompt(message)
+
+			// Build system prompt with planning context
+			fullPrompt := "You are a senior engineer planning changes to a codebase. " + planningPrompt
+
+			// Phase 3: Chat loop with tool support
+			messages := []llm.Message{{Role: "system", Content: fullPrompt}}
+			messages = append(messages, llm.Message{Role: "user", Content: message})
+
+			bridge := NewToolBridge(reg)
+			tools := bridge.GetTools()
+
+			localClient, ok := deps.LLM.(*llm.LocalClient)
+			if !ok {
+				sink.Error("Tool calling not supported by this LLM client")
+				return nil
+			}
+
+			for {
+				if ctx.Err() != nil {
+					return nil
+				}
+
+				sink.Status(fmt.Sprintf("Thinking (%s)...", deps.LLM.Name()))
+
+				// Stream the response
+				var lineBuf strings.Builder
+				msg, err := localClient.ChatWithTools(ctx, messages, tools, func(event llm.StreamEvent) {
+					switch event.Type {
+					case "token":
+						for _, ch := range event.Token {
+							if ch == '\n' {
+								sink.PrintMarkdown(lineBuf.String())
+								lineBuf.Reset()
+							} else {
+								lineBuf.WriteRune(ch)
+							}
+						}
+					case "tool_call":
+						sink.Print(fmt.Sprintf("🔧 Calling tool: %s", event.ToolCall.Function.Name))
+					}
+				})
+
+				// Flush any remaining content
+				if lineBuf.Len() > 0 {
+					sink.PrintMarkdown(lineBuf.String())
+				}
+
+				if err != nil {
+					sink.Error(fmt.Sprintf("LLM error: %v", err))
+					return nil
+				}
+
+				// Add assistant's response to conversation
+				messages = append(messages, *msg)
+
+				// If no tool calls, we're done
+				if len(msg.ToolCalls) == 0 {
+					break
+				}
+
+				// Execute each tool call and add results
+				for _, toolCall := range msg.ToolCalls {
+					result, err := bridge.ExecuteTool(ctx, toolCall, sink)
+					if err != nil {
+						result = fmt.Sprintf("Error executing tool: %v", err)
+						sink.Error(result)
+					}
+
+					// Add tool result to conversation
+					messages = append(messages, llm.Message{
+						Role:       "tool",
+						Content:    result,
+						ToolCallID: toolCall.ID,
+						Name:       toolCall.Function.Name,
+					})
+				}
+			}
+
+			// Phase 4: Parse and present final plan
+			planText := messages[len(messages)-1].Content
+			if plan, err := planner.ParsePlan(planText); err == nil {
+				sink.PrintStyled(fmt.Sprintf("Plan: %s (%d steps)", plan.Summary, len(plan.Steps)))
+				for i, step := range plan.Steps {
+					sink.Print(fmt.Sprintf("  %d. %s", i+1, step.Task))
+				}
+			} else {
+				sink.PrintStyled("No plan generated:")
+				sink.PrintMarkdown(planText)
+			}
+
+			idx.Close()
+			return nil
+		},
+	}
 }
 
 func helpCommand(reg *Registry) *Command {
@@ -235,165 +372,6 @@ func (a *analyzeSinkAdapter) PrintStyled(line string)   { a.inner.PrintStyled(li
 func (a *analyzeSinkAdapter) Status(text string)        { a.inner.Status(text) }
 func (a *analyzeSinkAdapter) Error(text string)         { a.inner.Error(text) }
 func (a *analyzeSinkAdapter) Finish(summary string)     { a.inner.Finish(summary) }
-
-func chatCommand(deps *Deps) *Command {
-	return &Command{
-		Name:        "chat",
-		Aliases:     []string{"ask"},
-		Description: "Ask the LLM about this repo — indexes code and plans changes",
-		Usage:       "/chat <message>",
-		Category:    "general",
-		Args: []Arg{
-			{Name: "message", Description: "Your question or request"},
-		},
-		Run: func(ctx context.Context, args ParsedArgs, sink Sink) error {
-			if deps.LLM == nil {
-				sink.Error("No LLM available. Start ollama or another local model, then restart majordomo.")
-				return nil
-			}
-
-			message := strings.Join(args.Positional, " ")
-			if message == "" {
-				message = args.Raw
-			}
-			if message == "" {
-				sink.Error("Say something! e.g. /chat add a new endpoint to the API")
-				return nil
-			}
-
-			path := deps.RepoDir
-
-			// Phase 1: Index the repo
-			sink.Status("Indexing repository...")
-			idx := indexer.New(path)
-			if err := idx.Index(); err != nil {
-				sink.Error(fmt.Sprintf("index: %v", err))
-				return nil
-			}
-			idx.ResolveImportEdges()
-			idx.ResolveReferences()
-
-			// Phase 2: Build planning prompt with repo skeleton
-			sink.Status("Analyzing task...")
-			p := planner.NewPlanner(idx.Graph, path)
-			planningPrompt := p.BuildPlanningPrompt(message)
-
-			// Wrap with system prompt
-			fullPrompt := `You are majordomo, an AI assistant that helps developers understand and improve their projects. You are running locally on the user's machine, inside their repository.
-
-` + planningPrompt
-
-			// Send to LLM to generate a plan
-			sink.Status(fmt.Sprintf("Planning (%s)...", deps.LLM.Name()))
-			planResp, err := deps.LLM.Generate(ctx, fullPrompt)
-			idx.Close()
-			if err != nil {
-				sink.Error(fmt.Sprintf("LLM: %v", err))
-				return nil
-			}
-
-			// Parse the plan
-			plan, err := planner.ParsePlan(planResp)
-			if err != nil {
-				sink.Error(fmt.Sprintf("Failed to parse plan: %v", err))
-				sink.Print("LLM response (not a valid plan):")
-				sink.PrintMarkdown(planResp)
-				return nil
-			}
-
-			sink.PrintStyled(fmt.Sprintf("Plan: %s (%d steps)", plan.Summary, len(plan.Steps)))
-			sink.Print("")
-
-			// Phase 3: Execute each plan step
-			idx = indexer.New(path)
-			for i, step := range plan.Steps {
-				if ctx.Err() != nil {
-					sink.PrintStyled("⊘ Cancelled")
-					idx.Close()
-					return nil
-				}
-
-				switch step.Action {
-				case planner.ActionRun:
-					sink.PrintStyled(fmt.Sprintf("--- Step %d/%d: Run `%s` ---", i+1, len(plan.Steps), step.Command))
-					sink.Print(fmt.Sprintf("Command: %s", step.Command))
-					// Just log — we don't execute shell commands from chat
-					sink.Print("  (executed in your terminal)")
-
-				case planner.ActionDelete:
-					stepPrompt, err := p.BuildStepPrompt(step)
-					if err != nil {
-						sink.Error(fmt.Sprintf("Step %d (%s %s): %v", i+1, step.Action, step.Target, err))
-						continue
-					}
-					sink.PrintStyled(fmt.Sprintf("--- Step %d/%d: Delete `%s` ---", i+1, len(plan.Steps), step.Target))
-					sink.Status(fmt.Sprintf("Executing step %d/%d (%s)...", i+1, len(plan.Steps), step.Action))
-					streamChat(ctx, sink, deps.LLM, stepPrompt, func(token string) {
-						var lineBuf strings.Builder
-						for _, ch := range token {
-							if ch == '\n' {
-								sink.PrintMarkdown(lineBuf.String())
-								lineBuf.Reset()
-							} else {
-								lineBuf.WriteRune(ch)
-							}
-						}
-						if lineBuf.Len() > 0 {
-							sink.PrintMarkdown(lineBuf.String())
-						}
-					})
-
-				default:
-					stepPrompt, err := p.BuildStepPrompt(step)
-					if err != nil {
-						sink.Error(fmt.Sprintf("Step %d (%s %s): %v", i+1, step.Action, step.Target, err))
-						continue
-					}
-					sink.PrintStyled(fmt.Sprintf("--- Step %d/%d: %s `%s` in `%s` ---", i+1, len(plan.Steps), step.Action, step.Target, step.File))
-					sink.Status(fmt.Sprintf("Executing step %d/%d (%s)...", i+1, len(plan.Steps), step.Action))
-					streamChat(ctx, sink, deps.LLM, stepPrompt, func(token string) {
-						var lineBuf strings.Builder
-						for _, ch := range token {
-							if ch == '\n' {
-								sink.PrintMarkdown(lineBuf.String())
-								lineBuf.Reset()
-							} else {
-								lineBuf.WriteRune(ch)
-							}
-						}
-						if lineBuf.Len() > 0 {
-							sink.PrintMarkdown(lineBuf.String())
-						}
-					})
-				}
-				sink.Print("")
-			}
-
-			idx.Close()
-			sink.Finish(fmt.Sprintf("Completed %d steps", len(plan.Steps)))
-			return nil
-		},
-	}
-}
-
-// planStepsDone tracks completed steps per context.
-func streamChat(ctx context.Context, sink Sink, client llm.Client, prompt string, onChunk func(token string)) {
-	var lineBuf strings.Builder
-	_, err := client.Stream(ctx, prompt, func(token string) {
-		for _, ch := range token {
-			if ch == '\n' {
-				sink.PrintMarkdown(lineBuf.String())
-				lineBuf.Reset()
-			} else {
-				lineBuf.WriteRune(ch)
-			}
-		}
-		onChunk(token)
-	})
-	if err != nil {
-		sink.Error(fmt.Sprintf("LLM: %v", err))
-	}
-}
 
 func statusCommand(deps *Deps) *Command {
 	return &Command{

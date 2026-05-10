@@ -159,7 +159,7 @@ func (r *Registry) Parse(input string) (*Command, ParsedArgs, error) {
 				}, nil
 			}
 		}
-		return nil, ParsedArgs{}, fmt.Errorf("unknown command: %s — type /help for commands, or just ask a question", parts[0])
+		return nil, ParsedArgs{}, fmt.Errorf("unknown command: %s — type /help for commands, or just type a question to chat", parts[0])
 	}
 
 	args, err := parseArgs(parts[1:], cmd.Args)

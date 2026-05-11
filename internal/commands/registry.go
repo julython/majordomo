@@ -56,6 +56,8 @@ type Sink interface {
 	Error(text string)
 	// Finish signals the command is done. Pass a summary or "".
 	Finish(summary string)
+	// Confirm asks the user to confirm an action. Returns true if confirmed.
+	Confirm(prompt string) bool
 }
 
 // Registry holds all known commands.

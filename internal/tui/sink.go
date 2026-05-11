@@ -59,6 +59,13 @@ func (s *StreamSink) Finish(summary string) {
 	}
 }
 
+// Confirm asks the user to confirm via a TUI dialog.
+func (s *StreamSink) Confirm(prompt string) bool {
+	result := make(chan bool, 1)
+	s.p.Send(confirmMsg{prompt: prompt, resultCh: result})
+	return <-result
+}
+
 // CLISink writes directly to stdout for non-interactive mode.
 type CLISink struct {
 	w *bufio.Writer
@@ -128,4 +135,15 @@ func (s *CLISink) Finish(summary string) {
 		fmt.Fprintln(s.w, summary)
 	}
 	s.w.Flush()
+}
+
+// Confirm prompts the user on the terminal and reads a yes/no response.
+func (s *CLISink) Confirm(prompt string) bool {
+	fmt.Print(prompt + " [y/N]: ")
+	var answer string
+	_, err := fmt.Fscanln(os.Stdin, &answer)
+	if err != nil {
+		return false
+	}
+	return strings.ToLower(answer) == "y" || strings.ToLower(answer) == "yes"
 }

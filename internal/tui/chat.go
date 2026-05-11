@@ -32,6 +32,10 @@ type (
 		err     error
 	}
 	cmdMarkdownLineMsg struct{ line string }
+	confirmMsg         struct {
+		prompt   string
+		resultCh chan bool
+	}
 )
 
 // --- Chat message types ---
@@ -98,6 +102,11 @@ type Chat struct {
 	// History
 	history    []string
 	historyIdx int
+
+	// Plan confirmation
+	confirmPrompt string
+	confirmCh     chan bool
+	confirmPending bool
 
 	width  int
 	height int
@@ -189,6 +198,30 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key != "tab" && c.completing {
 			c.completing = false
 			c.suggestions = nil
+		}
+
+		// Handle confirmation response before normal key handling
+		if c.confirmPending {
+			if key == "y" {
+				c.confirmPending = false
+				if c.confirmCh != nil {
+					c.confirmCh <- true
+					c.confirmCh = nil
+				}
+				c.append(MsgSystem, "✓ Confirmed")
+				c.dirty = true
+				return c, nil
+			}
+			if key == "n" {
+				c.confirmPending = false
+				if c.confirmCh != nil {
+					c.confirmCh <- false
+					c.confirmCh = nil
+				}
+				c.append(MsgSystem, "✗ Cancelled")
+				c.dirty = true
+				return c, nil
+			}
 		}
 
 		switch key {
@@ -297,6 +330,15 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		c.spinner, cmd = c.spinner.Update(msg)
 		return c, cmd
+
+	case confirmMsg:
+		// Queue the confirmation request
+		c.confirmPrompt = msg.prompt
+		c.confirmCh = msg.resultCh
+		c.confirmPending = true
+		c.append(MsgStyled, msg.prompt + " [y/N]")
+		c.dirty = true
+		return c, nil
 	}
 
 	// Sync viewport only when messages changed

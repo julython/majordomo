@@ -103,7 +103,7 @@ func chatCommand(deps *Deps, reg *Registry) *Command {
 			bridge := NewToolBridge(reg, executor.New(path))
 			tools := bridge.GetTools()
 
-			localClient, ok := deps.LLM.(*llm.LocalClient)
+			toolClient, ok := deps.LLM.(llm.ToolClient)
 			if !ok {
 				sink.Error("Tool calling not supported by this LLM client")
 				return nil
@@ -118,7 +118,7 @@ func chatCommand(deps *Deps, reg *Registry) *Command {
 
 				// Stream the response
 				var lineBuf strings.Builder
-				msg, err := localClient.ChatWithTools(ctx, messages, tools, func(event llm.StreamEvent) {
+				msg, err := toolClient.ChatWithTools(ctx, messages, tools, func(event llm.StreamEvent) {
 					switch event.Type {
 					case "token":
 						for _, ch := range event.Token {
@@ -170,13 +170,28 @@ func chatCommand(deps *Deps, reg *Registry) *Command {
 				}
 			}
 
-			// Phase 4: Parse and present final plan
+			// Phase 4: Parse and execute final plan
 			planText := messages[len(messages)-1].Content
 			if plan, err := planner.ParsePlan(planText); err == nil {
-				sink.PrintStyled(fmt.Sprintf("Plan: %s (%d steps)", plan.Summary, len(plan.Steps)))
-				for i, step := range plan.Steps {
-					sink.Print(fmt.Sprintf("  %d. %s", i+1, step.Task))
-				}
+					cmdPlan := &Plan{
+						Summary: plan.Summary,
+						Steps:   make([]Step, len(plan.Steps)),
+					}
+					for i, s := range plan.Steps {
+						cmdPlan.Steps[i] = Step{
+							Action: string(s.Action),
+							Target: s.Target,
+							File:   s.File,
+							Task:   s.Task,
+						}
+					}
+					sink.PrintStyled(fmt.Sprintf("Plan: %s (%d steps)", cmdPlan.Summary, len(cmdPlan.Steps)))
+					for i, step := range cmdPlan.Steps {
+						sink.Print(fmt.Sprintf("  %d. %s", i+1, step.Task))
+					}
+					if err := bridge.ExecutePlan(ctx, cmdPlan, sink); err != nil {
+						sink.Error(fmt.Sprintf("plan execution: %v", err))
+					}
 			} else {
 				sink.PrintStyled("No plan generated:")
 				sink.PrintMarkdown(planText)
@@ -373,6 +388,7 @@ func (a *analyzeSinkAdapter) PrintStyled(line string)   { a.inner.PrintStyled(li
 func (a *analyzeSinkAdapter) Status(text string)        { a.inner.Status(text) }
 func (a *analyzeSinkAdapter) Error(text string)         { a.inner.Error(text) }
 func (a *analyzeSinkAdapter) Finish(summary string)     { a.inner.Finish(summary) }
+func (a *analyzeSinkAdapter) Confirm(prompt string) bool { return a.inner.Confirm(prompt) }
 
 func statusCommand(deps *Deps) *Command {
 	return &Command{

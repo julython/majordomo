@@ -191,7 +191,26 @@ func (tb *ToolBridge) convertToCommandArgs(args map[string]interface{}, cmd *Com
 
 // ExecutePlan executes each step in the plan using the executor.
 // Called by the chat command after the LLM loop completes.
-func (tb *ToolBridge) ExecutePlan(ctx context.Context, plan *Plan) error {
+func (tb *ToolBridge) ExecutePlan(ctx context.Context, plan *Plan, sink Sink) error {
+	// Build confirmation prompt
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Plan: %s (%d steps)\n", plan.Summary, len(plan.Steps)))
+	for i, step := range plan.Steps {
+		b.WriteString(fmt.Sprintf("  %d. [%s] %s", i+1, step.Action, step.Task))
+		if step.File != "" {
+			b.WriteString(fmt.Sprintf(" in %s", step.File))
+			if step.Target != "" {
+				b.WriteString(fmt.Sprintf(" (%s)", step.Target))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	if !sink.Confirm(b.String() + "\nExecute plan?") {
+		sink.Print("Plan cancelled.")
+		return nil
+	}
+
 	for i, step := range plan.Steps {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -203,28 +222,28 @@ func (tb *ToolBridge) ExecutePlan(ctx context.Context, plan *Plan) error {
 			if err != nil {
 				return fmt.Errorf("step %d (modify %s in %s): %w", i+1, step.Target, step.File, err)
 			}
-			fmt.Printf("Modified %s in %s (old: %d chars)\n", step.Target, step.File, len(oldBody))
+			sink.Print(fmt.Sprintf("Modified %s in %s (old: %d chars)", step.Target, step.File, len(oldBody)))
 
 		case "add":
 			err := tb.executor.InsertAfter(step.File, step.Target, step.Task)
 			if err != nil {
 				return fmt.Errorf("step %d (add after %s in %s): %w", i+1, step.Target, step.File, err)
 			}
-			fmt.Printf("Added code after %s in %s\n", step.Target, step.File)
+			sink.Print(fmt.Sprintf("Added code after %s in %s", step.Target, step.File))
 
 		case "delete":
 			err := tb.executor.DeleteSymbol(step.File, step.Target)
 			if err != nil {
 				return fmt.Errorf("step %d (delete %s in %s): %w", i+1, step.Target, step.File, err)
 			}
-			fmt.Printf("Deleted %s from %s\n", step.Target, step.File)
+			sink.Print(fmt.Sprintf("Deleted %s from %s", step.Target, step.File))
 
 		case "create":
 			err := tb.executor.WriteFile(step.File, []byte(step.Task))
 			if err != nil {
 				return fmt.Errorf("step %d (create %s): %w", i+1, step.File, err)
 			}
-			fmt.Printf("Created %s\n", step.File)
+			sink.Print(fmt.Sprintf("Created %s", step.File))
 
 		case "run":
 			parts := strings.Fields(step.Task)
@@ -233,12 +252,13 @@ func (tb *ToolBridge) ExecutePlan(ctx context.Context, plan *Plan) error {
 			}
 			output, err := tb.executor.RunCommand(tb.executor.Root, parts[0], parts[1:]...)
 			if err != nil {
-				fmt.Printf("Step %d (run) failed: %v\n  Output: %s\n", i+1, err, string(output))
+				sink.Print(fmt.Sprintf("Step %d (run) failed: %v\n  Output: %s", i+1, err, string(output)))
 			}
-			fmt.Printf("Step %d (run): %s", i+1, strings.TrimSpace(string(output)))
+			sink.Print(fmt.Sprintf("Step %d (run): %s", i+1, strings.TrimSpace(string(output))))
 		}
 	}
 
+	sink.Print("Plan completed.")
 	return nil
 }
 
@@ -267,6 +287,9 @@ func (cs *CaptureSink) Finish(summary string) {
 func (cs *CaptureSink) GetOutput() string {
 	return strings.Join(cs.Lines, "\n")
 }
+
+// Confirm auto-confirms for CaptureSink.
+func (cs *CaptureSink) Confirm(prompt string) bool { return true }
 
 // Plan is a sequence of steps to accomplish a task.
 type Plan struct {

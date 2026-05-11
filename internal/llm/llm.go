@@ -24,6 +24,12 @@ type Client interface {
 	Name() string
 }
 
+// ToolClient is an optional interface for LLMs that support tool calling.
+type ToolClient interface {
+	Client
+	ChatWithTools(ctx context.Context, messages []Message, tools []Tool, onEvent func(StreamEvent)) (*Message, error)
+}
+
 // LocalClient talks to any OpenAI-compatible API (ollama, llamacpp, lmstudio).
 type LocalClient struct {
 	baseURL  string

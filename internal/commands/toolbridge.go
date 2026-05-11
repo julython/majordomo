@@ -203,7 +203,7 @@ func (tb *ToolBridge) ExecutePlan(ctx context.Context, plan *Plan) error {
 			if err != nil {
 				return fmt.Errorf("step %d (modify %s in %s): %w", i+1, step.Target, step.File, err)
 			}
-			fmt.Printf("Modified %s in %s (old: %s chars)\n", step.Target, step.File, len(oldBody))
+			fmt.Printf("Modified %s in %s (old: %d chars)\n", step.Target, step.File, len(oldBody))
 
 		case "add":
 			err := tb.executor.InsertAfter(step.File, step.Target, step.Task)

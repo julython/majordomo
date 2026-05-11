@@ -61,8 +61,12 @@ func (e *Executor) ReplaceSymbol(file, symbolName, newBody string) (string, erro
 	}
 
 	oldBody := string(content[sym.StartByte:sym.EndByte])
-	replaced := append(content[:sym.StartByte], []byte(newBody)...)
-	replaced = append(replaced, content[sym.EndByte:]...)
+	post := make([]byte, len(content)-int(sym.EndByte))
+	copy(post, content[sym.EndByte:])
+	replaced := make([]byte, 0, len(content)+len(newBody)-int(sym.EndByte-sym.StartByte))
+	replaced = append(replaced, content[:sym.StartByte]...)
+	replaced = append(replaced, []byte(newBody)...)
+	replaced = append(replaced, post...)
 	if err := os.WriteFile(filepath.Join(e.Root, file), replaced, 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
@@ -102,7 +106,10 @@ func (e *Executor) InsertAfter(file, afterSymbol, newCode string) error {
 		insertPos++
 	}
 
-	inserted := append(content[:insertPos], append([]byte("\n"+newCode+"\n"), content[insertPos:]...)...)
+	inserted := make([]byte, 0, len(content)+len("\n"+newCode+"\n"))
+	inserted = append(inserted, content[:insertPos]...)
+	inserted = append(inserted, []byte("\n"+newCode+"\n")...)
+	inserted = append(inserted, content[insertPos:]...)
 	return os.WriteFile(filepath.Join(e.Root, file), inserted, 0o644)
 }
 

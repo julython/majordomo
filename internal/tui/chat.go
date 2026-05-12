@@ -104,8 +104,8 @@ type Chat struct {
 	historyIdx int
 
 	// Plan confirmation
-	confirmPrompt string
-	confirmCh     chan bool
+	confirmPrompt  string
+	confirmCh      chan bool
 	confirmPending bool
 
 	width  int
@@ -336,8 +336,10 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.confirmPrompt = msg.prompt
 		c.confirmCh = msg.resultCh
 		c.confirmPending = true
-		c.append(MsgStyled, msg.prompt + " [y/N]")
-		c.dirty = true
+		c.append(MsgStyled, msg.prompt+" [y/N]")
+		c.syncViewport()
+		c.viewport.GotoBottom()
+		c.dirty = false
 		return c, nil
 	}
 
@@ -408,6 +410,7 @@ func (c *Chat) View() string {
 	header := barStyle.Width(c.width).Render("majordomo")
 
 	var statusBar string
+	//if c.status != "" && !c.confirmPending {
 	if c.status != "" {
 		statusBar = fmt.Sprintf(" %s %s", c.spinner.View(), statusLine.Render(c.status))
 	}

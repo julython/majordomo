@@ -173,25 +173,25 @@ func chatCommand(deps *Deps, reg *Registry) *Command {
 			// Phase 4: Parse and execute final plan
 			planText := messages[len(messages)-1].Content
 			if plan, err := planner.ParsePlan(planText); err == nil {
-					cmdPlan := &Plan{
-						Summary: plan.Summary,
-						Steps:   make([]Step, len(plan.Steps)),
+				cmdPlan := &Plan{
+					Summary: plan.Summary,
+					Steps:   make([]Step, len(plan.Steps)),
+				}
+				for i, s := range plan.Steps {
+					cmdPlan.Steps[i] = Step{
+						Action: string(s.Action),
+						Target: s.Target,
+						File:   s.File,
+						Task:   s.Task,
 					}
-					for i, s := range plan.Steps {
-						cmdPlan.Steps[i] = Step{
-							Action: string(s.Action),
-							Target: s.Target,
-							File:   s.File,
-							Task:   s.Task,
-						}
-					}
-					sink.PrintStyled(fmt.Sprintf("Plan: %s (%d steps)", cmdPlan.Summary, len(cmdPlan.Steps)))
-					for i, step := range cmdPlan.Steps {
-						sink.Print(fmt.Sprintf("  %d. %s", i+1, step.Task))
-					}
-					if err := bridge.ExecutePlan(ctx, cmdPlan, sink); err != nil {
-						sink.Error(fmt.Sprintf("plan execution: %v", err))
-					}
+				}
+				sink.PrintStyled(fmt.Sprintf("Plan: %s (%d steps)", cmdPlan.Summary, len(cmdPlan.Steps)))
+				for i, step := range cmdPlan.Steps {
+					sink.Print(fmt.Sprintf("  %d. %s", i+1, step.Task))
+				}
+				if err := bridge.ExecutePlan(ctx, cmdPlan, sink); err != nil {
+					sink.Error(fmt.Sprintf("plan execution: %v", err))
+				}
 			} else {
 				sink.PrintStyled("No plan generated:")
 				sink.PrintMarkdown(planText)
@@ -382,12 +382,12 @@ func analyzeCommand(deps *Deps) *Command {
 // analyzeSinkAdapter bridges commands.Sink to analyze.Sink.
 type analyzeSinkAdapter struct{ inner Sink }
 
-func (a *analyzeSinkAdapter) Print(text string)         { a.inner.Print(text) }
-func (a *analyzeSinkAdapter) PrintMarkdown(text string) { a.inner.PrintMarkdown(text) }
-func (a *analyzeSinkAdapter) PrintStyled(line string)   { a.inner.PrintStyled(line) }
-func (a *analyzeSinkAdapter) Status(text string)        { a.inner.Status(text) }
-func (a *analyzeSinkAdapter) Error(text string)         { a.inner.Error(text) }
-func (a *analyzeSinkAdapter) Finish(summary string)     { a.inner.Finish(summary) }
+func (a *analyzeSinkAdapter) Print(text string)          { a.inner.Print(text) }
+func (a *analyzeSinkAdapter) PrintMarkdown(text string)  { a.inner.PrintMarkdown(text) }
+func (a *analyzeSinkAdapter) PrintStyled(line string)    { a.inner.PrintStyled(line) }
+func (a *analyzeSinkAdapter) Status(text string)         { a.inner.Status(text) }
+func (a *analyzeSinkAdapter) Error(text string)          { a.inner.Error(text) }
+func (a *analyzeSinkAdapter) Finish(summary string)      { a.inner.Finish(summary) }
 func (a *analyzeSinkAdapter) Confirm(prompt string) bool { return a.inner.Confirm(prompt) }
 
 func statusCommand(deps *Deps) *Command {

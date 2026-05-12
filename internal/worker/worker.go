@@ -137,14 +137,8 @@ func executeAnalyze(ctx context.Context, repoPath string, client llm.Client) (an
 
 	report := grade.FromData(data.ToGradeInput())
 
-	var narrative string
-	if client != nil {
-		narrative, _ = client.Generate(ctx, analyze.BuildPrompt(data, report))
-	}
-
 	return map[string]any{
-		"grade":     report,
-		"narrative": narrative,
+		"grade": report,
 	}, nil
 }
 

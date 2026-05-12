@@ -88,26 +88,64 @@ func chatCommand(deps *Deps, reg *Registry) *Command {
 			idx.ResolveImportEdges()
 			idx.ResolveReferences()
 
-			// Phase 2: Build planning prompt with repo skeleton
-			sink.Status("Analyzing task...")
+			// Phase 2: Pre-planning - ask LLM what it needs to examine
+			sink.Status("Pre-planning: identifying required context...")
 			p := planner.NewPlanner(idx.Graph, path)
-			planningPrompt := p.BuildPlanningPrompt(message)
+			prePlanPrompt := p.BuildPrePlanningPrompt(message)
 
-			// Build system prompt with planning context
-			fullPrompt := "You are a senior engineer planning changes to a codebase. " + planningPrompt
-
-			// Phase 3: Chat loop with tool support
-			messages := []llm.Message{{Role: "system", Content: fullPrompt}}
-			messages = append(messages, llm.Message{Role: "user", Content: message})
-
-			bridge := NewToolBridge(reg, executor.New(path))
-			tools := bridge.GetTools()
+			// Send pre-planning prompt to LLM
+			prePlanMessages := []llm.Message{
+				{Role: "system", Content: prePlanPrompt},
+				{Role: "user", Content: message},
+			}
 
 			toolClient, ok := deps.LLM.(llm.ToolClient)
 			if !ok {
 				sink.Error("Tool calling not supported by this LLM client")
 				return nil
 			}
+
+			sink.Status(fmt.Sprintf("Analyzing requirements (%s)...", deps.LLM.Name()))
+			prePlanResp, err := toolClient.ChatWithTools(ctx, prePlanMessages, nil, nil)
+			if err != nil {
+				sink.Error(fmt.Sprintf("Pre-planning error: %v", err))
+				return nil
+			}
+
+			// Parse the pre-plan response
+			prePlan, err := planner.ParsePrePlanResponse(prePlanResp.Content)
+			if err != nil {
+				sink.Error(fmt.Sprintf("Failed to parse pre-plan: %v", err))
+				sink.Print("LLM Response: " + prePlanResp.Content)
+				return nil
+			}
+
+			sink.PrintStyled(fmt.Sprintf("📋 Pre-plan: %s", prePlan.Summary))
+			if len(prePlan.Symbols) > 0 {
+				sink.Print(fmt.Sprintf("  Examining %d symbols: %v", len(prePlan.Symbols), prePlan.Symbols))
+			}
+			if len(prePlan.Files) > 0 {
+				sink.Print(fmt.Sprintf("  Reading %d files: %v", len(prePlan.Files), prePlan.Files))
+			}
+
+			// Phase 3: Gather the requested context
+			sink.Status("Gathering code context...")
+			context, ctxErr := p.GatherContext(prePlan)
+			if ctxErr != nil {
+				sink.Error(fmt.Sprintf("Failed to gather context: %v", ctxErr))
+				return nil
+			}
+
+			// Phase 4: Build enhanced planning prompt with full context
+			sink.Status("Creating detailed plan...")
+			enhancedPrompt := p.BuildEnhancedPlanningPrompt(message, prePlan, context)
+
+			// Phase 5: Chat loop with tool support for final planning
+			messages := []llm.Message{{Role: "system", Content: enhancedPrompt}}
+			messages = append(messages, llm.Message{Role: "user", Content: message})
+
+			bridge := NewToolBridge(reg, executor.New(path))
+			tools := bridge.GetTools()
 
 			for {
 				if ctx.Err() != nil {
